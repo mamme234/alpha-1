@@ -5,6 +5,7 @@ import { requireActorId } from "./helpers";
 /** Run records: inference, training, rag, agent, workflow. */
 export const recordRun = mutation({
   args: {
+    sessionToken: v.string(),
     kind: v.string(),
     status: v.string(),
     traceId: v.string(),
@@ -15,15 +16,15 @@ export const recordRun = mutation({
     error: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     return await ctx.db.insert("alphaRuns", { ...args, actorId, createdAt: Date.now() });
   },
 });
 
 export const listRuns = query({
-  args: { kind: v.optional(v.string()), limit: v.optional(v.number()) },
+  args: { sessionToken: v.string(), kind: v.optional(v.string()), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = args.kind
       ? await ctx.db
           .query("alphaRuns")
@@ -38,9 +39,9 @@ export const listRuns = query({
 });
 
 export const runStats = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaRuns")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))
@@ -70,6 +71,7 @@ export const runStats = query({
 /** Spans written by Alpha's tracer. */
 export const recordSpans = mutation({
   args: {
+    sessionToken: v.string(),
     spans: v.array(
       v.object({
         traceId: v.string(),
@@ -86,7 +88,7 @@ export const recordSpans = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     for (const span of args.spans) {
       await ctx.db.insert("alphaSpans", { ...span, actorId, createdAt: Date.now() });
     }
@@ -95,9 +97,9 @@ export const recordSpans = mutation({
 });
 
 export const listSpans = query({
-  args: { limit: v.optional(v.number()) },
+  args: { sessionToken: v.string(), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaSpans")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))
@@ -109,6 +111,7 @@ export const listSpans = query({
 /** Hash-chained audit records. */
 export const appendAudit = mutation({
   args: {
+    sessionToken: v.string(),
     records: v.array(
       v.object({
         recordId: v.string(),
@@ -127,7 +130,7 @@ export const appendAudit = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     let written = 0;
     for (const record of args.records) {
       const existing = await ctx.db
@@ -143,9 +146,9 @@ export const appendAudit = mutation({
 });
 
 export const listAudit = query({
-  args: { limit: v.optional(v.number()) },
+  args: { sessionToken: v.string(), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaAuditLogs")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))

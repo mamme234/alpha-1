@@ -1,47 +1,130 @@
-import { authTables } from "@convex-dev/auth/server";
 import { defineSchema, defineTable } from "convex/server";
-import { Infer, v } from "convex/values";
-
-// default user roles. can add / remove based on the project as needed
-export const ROLES = {
-  ADMIN: "admin",
-  USER: "user",
-  MEMBER: "member",
-} as const;
-
-export const roleValidator = v.union(
-  v.literal(ROLES.ADMIN),
-  v.literal(ROLES.USER),
-  v.literal(ROLES.MEMBER),
-);
-export type Role = Infer<typeof roleValidator>;
+import { v } from "convex/values";
 
 /**
- * Alpha persistence tables.
+ * Alpha's database schema.
  *
- * These store Alpha's *own* artifacts: model records, trained vocabularies,
- * checkpoints produced by Alpha's training engine, vectors from Alpha's
- * embeddings, memories, run records, spans, the audit chain and workflow jobs.
+ * Every table here belongs to Alpha. There is no provider-owned table, no
+ * federated identity table and nothing that stores output from an external
+ * model. Convex is the application database — Alpha's own backend runtime —
+ * not an AI provider.
  *
- * Convex is the application database, not an AI provider: no table here holds
- * output from an external model, and nothing in the Alpha stack calls out to
- * one. Every row is scoped to the signed-in user.
+ * Responsibilities are kept apart:
+ *   alphaUsers, alphaSessions   → identity and sessions (Alpha Authentication)
+ *   alphaConversations, alphaMessages → conversations
+ *   alphaModels, alphaTokenizers, alphaDatasets, alphaCheckpoints → model management
+ *   alphaVectors, alphaMemories → retrieval and memory
+ *   alphaRuns, alphaSpans, alphaAuditLogs → observability and audit
+ *   alphaTools, alphaWorkflows, alphaJobs → tools and automation
+ *
+ * `actorId` is the id of the `alphaUsers` row that owns the record. It is the
+ * only value the API layer trusts for ownership, and it is resolved from a
+ * session on every call — never taken from the client.
  */
+
+export const ALPHA_ROLES = ["user", "admin"] as const;
+export type AlphaRole = (typeof ALPHA_ROLES)[number];
+
+export const ALPHA_ACCOUNT_STATUSES = ["active", "suspended"] as const;
+export type AlphaAccountStatus = (typeof ALPHA_ACCOUNT_STATUSES)[number];
+
+export const alphaRoleValidator = v.union(v.literal("user"), v.literal("admin"));
+export const alphaAccountStatusValidator = v.union(v.literal("active"), v.literal("suspended"));
+
 const schema = defineSchema(
   {
-    // default auth tables using convex auth.
-    ...authTables, // do not remove or modify
+    /**
+     * Alpha accounts.
+     *
+     * Passwords are never stored: only a PBKDF2-HMAC-SHA256 derivation with a
+     * per-account salt. `passwordIterations` is stored alongside so the work
+     * factor can be raised later without invalidating existing accounts.
+     */
+    alphaUsers: defineTable({
+      /** The address as the account holder typed it, for display. */
+      email: v.string(),
+      /** Lowercased, trimmed address. The unique key lookups use. */
+      emailKey: v.string(),
+      displayName: v.string(),
+      passwordHash: v.string(),
+      passwordSalt: v.string(),
+      passwordIterations: v.number(),
+      passwordAlgorithm: v.string(),
+      role: alphaRoleValidator,
+      status: alphaAccountStatusValidator,
+      createdAt: v.number(),
+      updatedAt: v.number(),
+      lastSignInAt: v.optional(v.number()),
+      failedSignIns: v.number(),
+      /** Set while a burst of failed sign-ins is cooling down. */
+      lockedUntil: v.optional(v.number()),
+      /**
+       * Bumped whenever every existing session must stop working (a password
+       * change, or "sign out everywhere"). Sessions carry the epoch they were
+       * issued under; a mismatch means the session is dead.
+       */
+      sessionEpoch: v.number(),
+    }).index("by_email", ["emailKey"]),
 
-    // the users table is the default users table that is brought in by the authTables
-    users: defineTable({
-      name: v.optional(v.string()), // name of the user. do not remove
-      image: v.optional(v.string()), // image of the user. do not remove
-      email: v.optional(v.string()), // email of the user. do not remove
-      emailVerificationTime: v.optional(v.number()), // email verification time. do not remove
-      isAnonymous: v.optional(v.boolean()), // is the user anonymous. do not remove
+    /**
+     * Alpha sessions.
+     *
+     * The row stores `sha256(token)` — never the token itself — so a database
+     * dump does not hand over working sessions. Sessions expire absolutely
+     * (`expiresAt`), go idle (`lastSeenAt` + the API's idle window), and can be
+     * revoked individually or all at once.
+     */
+    alphaSessions: defineTable({
+      userId: v.id("alphaUsers"),
+      tokenHash: v.string(),
+      epoch: v.number(),
+      createdAt: v.number(),
+      expiresAt: v.number(),
+      lastSeenAt: v.number(),
+      revokedAt: v.optional(v.number()),
+      revokedReason: v.optional(v.string()),
+      userAgent: v.optional(v.string()),
+    })
+      .index("by_token", ["tokenHash"])
+      .index("by_user", ["userId"]),
 
-      role: v.optional(roleValidator), // role of the user. do not remove
-    }).index("email", ["email"]), // index for the email. do not remove or modify
+    /** A conversation between a user and Alpha. */
+    alphaConversations: defineTable({
+      actorId: v.string(),
+      conversationId: v.string(),
+      title: v.string(),
+      /** generate | rag | agent */
+      kind: v.string(),
+      messageCount: v.number(),
+      lastMessageAt: v.number(),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+    })
+      .index("by_actor", ["actorId"])
+      .index("by_conversation", ["conversationId"])
+      .index("by_actor_updated", ["actorId", "updatedAt"]),
+
+    /**
+     * One turn in a conversation. `content` is Alpha's own output (or the user's
+     * message) with `modelStage` recorded next to it, so a transcript can never
+     * be mistaken for a finished model's answer.
+     */
+    alphaMessages: defineTable({
+      actorId: v.string(),
+      conversationId: v.string(),
+      messageId: v.string(),
+      /** user | assistant | system */
+      role: v.string(),
+      content: v.string(),
+      /** Retrieved sources cited by an assistant message, if any. */
+      sources: v.array(v.object({ title: v.string(), score: v.float64(), chunkId: v.string() })),
+      modelStage: v.optional(v.string()),
+      tokens: v.optional(v.number()),
+      traceId: v.optional(v.string()),
+      createdAt: v.number(),
+    })
+      .index("by_conversation", ["actorId", "conversationId"])
+      .index("by_message", ["messageId"]),
 
     /**
      * Model records. `stage` is one of architecture | untrained | trained |
@@ -212,6 +295,22 @@ const schema = defineSchema(
     })
       .index("by_actor", ["actorId"])
       .index("by_record", ["recordId"]),
+
+    /**
+     * Security events raised by the API layer: sign-in outcomes, lockouts,
+     * revoked sessions and rejected authorisation checks.
+     */
+    alphaSecurityEvents: defineTable({
+      actorId: v.optional(v.string()),
+      emailKey: v.optional(v.string()),
+      kind: v.string(),
+      outcome: v.string(),
+      detail: v.string(),
+      at: v.number(),
+    })
+      .index("by_actor", ["actorId"])
+      .index("by_kind", ["kind"])
+      .index("by_email", ["emailKey"]),
 
     /** Tool descriptors registered by the workspace, for discovery and review. */
     alphaTools: defineTable({

@@ -10,6 +10,7 @@ import { requireActorId } from "./helpers";
  */
 export const upsertVectors = mutation({
   args: {
+    sessionToken: v.string(),
     collection: v.string(),
     dimension: v.number(),
     records: v.array(
@@ -23,7 +24,7 @@ export const upsertVectors = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     let written = 0;
     for (const record of args.records) {
       const existing = await ctx.db
@@ -62,9 +63,9 @@ export const upsertVectors = mutation({
 });
 
 export const listVectors = query({
-  args: { collection: v.optional(v.string()) },
+  args: { sessionToken: v.string(), collection: v.optional(v.string()) },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     if (args.collection) {
       return await ctx.db
         .query("alphaVectors")
@@ -79,9 +80,9 @@ export const listVectors = query({
 });
 
 export const stats = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaVectors")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))
@@ -101,9 +102,9 @@ export const stats = query({
 });
 
 export const clearCollection = mutation({
-  args: { collection: v.string() },
+  args: { sessionToken: v.string(), collection: v.string() },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaVectors")
       .withIndex("by_actor_collection", (q) => q.eq("actorId", actorId).eq("collection", args.collection))
@@ -114,9 +115,9 @@ export const clearCollection = mutation({
 });
 
 export const deleteBySource = mutation({
-  args: { collection: v.string(), sourceId: v.string() },
+  args: { sessionToken: v.string(), collection: v.string(), sourceId: v.string() },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaVectors")
       .withIndex("by_source", (q) => q.eq("actorId", actorId).eq("sourceId", args.sourceId))

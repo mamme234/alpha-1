@@ -69,9 +69,16 @@ let runtime: { actorId: string; workspace: AlphaWorkspace } | null = null;
 const nextTick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 export function useAlpha() {
-  const { user } = useAuth();
+  const { user, sessionToken } = useAuth();
   const convex = useConvex();
-  const actorId = (user?._id as string | undefined) ?? null;
+  const actorId = user?.id ?? null;
+
+  // Every Alpha function resolves the caller from this token, so the client
+  // never names its own account. Keyed through a ref so the wrappers below
+  // always send the current one.
+  const sessionTokenRef = useRef<string | null>(sessionToken);
+  sessionTokenRef.current = sessionToken;
+  const requireToken = () => sessionTokenRef.current ?? "";
 
   const recordModel = useMutation(api.alpha.models.record);
   const saveTokenizer = useMutation(api.alpha.training.saveTokenizer);
@@ -85,31 +92,23 @@ export function useAlpha() {
   const saveJob = useMutation(api.alpha.workflows.saveJob);
   const syncTools = useMutation(api.alpha.tools.syncTools);
 
-  const mutationsRef = useRef({
-    recordModel,
-    saveTokenizer,
-    saveCheckpoint,
-    saveVectors,
-    saveMemories,
-    saveSpans,
-    saveAudit,
-    recordRun,
-    saveWorkflow,
-    saveJob,
-    syncTools,
-  });
-  mutationsRef.current = {
-    recordModel,
-    saveTokenizer,
-    saveCheckpoint,
-    saveVectors,
-    saveMemories,
-    saveSpans,
-    saveAudit,
-    recordRun,
-    saveWorkflow,
-    saveJob,
-    syncTools,
+  /**
+   * The persistence adapter stays provider-agnostic: it takes plain functions.
+   * Attaching the session token is this file's job, done once here, so no call
+   * site can forget it and no Alpha module needs to know about sessions.
+   */
+  const alphaMutations: Parameters<typeof createConvexPersistence>[0] = {
+    recordModel: (args) => recordModel({ ...args, sessionToken: requireToken() }),
+    saveTokenizer: (args) => saveTokenizer({ ...args, sessionToken: requireToken() }),
+    saveCheckpoint: (args) => saveCheckpoint({ ...args, sessionToken: requireToken() }),
+    saveVectors: (args) => saveVectors({ ...args, sessionToken: requireToken() }),
+    saveMemories: (args) => saveMemories({ ...args, sessionToken: requireToken() }),
+    saveSpans: (args) => saveSpans({ ...args, sessionToken: requireToken() }),
+    saveAudit: (args) => saveAudit({ ...args, sessionToken: requireToken() }),
+    recordRun: (args) => recordRun({ ...args, sessionToken: requireToken() }),
+    saveWorkflow: (args) => saveWorkflow({ ...args, sessionToken: requireToken() }),
+    saveJob: (args) => saveJob({ ...args, sessionToken: requireToken() }),
+    syncTools: (args) => syncTools({ ...args, sessionToken: requireToken() }),
   };
 
   const [workspace, setWorkspace] = useState<AlphaWorkspace | null>(null);
@@ -132,7 +131,7 @@ export function useAlpha() {
     setBootError(null);
     const boot = async () => {
       try {
-        const persistence = createConvexPersistence(mutationsRef.current);
+        const persistence = createConvexPersistence(alphaMutations);
         const ws = new AlphaWorkspace({
           actorId,
           persistence,
@@ -147,7 +146,7 @@ export function useAlpha() {
         setSnapshot(initial);
         // Mirror the tool surface so permissions and approval gates stay
         // reviewable between sessions.
-        void createToolSync(mutationsRef.current)?.(
+        void createToolSync(alphaMutations)?.(
           initial.tools.registered.map((tool) => ({
             name: tool.name,
             description: tool.description,
@@ -281,7 +280,7 @@ export function useAlpha() {
     if (!active) return null;
     setBusy("resuming");
     try {
-      const row = await convex.query(api.alpha.training.latestCheckpoint, {});
+      const row = await convex.query(api.alpha.training.latestCheckpoint, { sessionToken: requireToken() });
       if (!row) return null;
       const checkpoint: AlphaCheckpoint = {
         id: row.checkpointId,

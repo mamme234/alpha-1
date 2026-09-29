@@ -1,11 +1,11 @@
 {
-  "name": "freebuff.com application",
-  "short_name": "freebuff.com",
-  "description": "freebuff.com application",
+  "name": "Alpha — self-owned AI system",
+  "short_name": "Alpha",
+  "description": "Alpha's own language model, training, inference, memory, tools, agents, RAG, security and observability. No external AI provider.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",
-  "theme_color": "#000000",
+  "theme_color": "#1c1917",
   "icons": [
     {
       "src": "/logo.svg",

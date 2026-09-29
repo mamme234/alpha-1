@@ -1,22 +1,23 @@
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import {
-  InputOTP,
-  InputOTPGroup,
-  InputOTPSlot,
-} from "@/components/ui/input-otp";
+/**
+ * Alpha Authentication page.
+ *
+ * Registration and sign-in against Alpha's own accounts. There is no identity
+ * provider behind this form, no one-time code emailed by a third party, and no
+ * guest identity that would let a visitor act as an account.
+ *
+ * The form states the password rules the server enforces rather than revealing
+ * them one rejection at a time, and sign-in failures stay deliberately vague:
+ * "email or password is incorrect" is the same answer whether the address exists
+ * or the password was wrong, so this page cannot be used to discover who has an
+ * account.
+ */
 
-import { useAuth } from "@/hooks/use-auth";
-import logo from "@/assets/logo.svg";
-import { ArrowRight, Loader2, Mail, UserX } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Eyebrow, Mono, Rule } from "@/components/alpha/studio";
+import { alphaAuthErrorMessage, useAuth } from "@/hooks/use-auth";
+import { ArrowRight, Loader2, LockKeyhole, ShieldCheck, TriangleAlert } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
@@ -24,10 +25,9 @@ interface AuthProps {
   redirectAfterAuth?: string;
 }
 
-function resolveRedirectAfterAuth(
-  returnTo: string | null,
-  fallback = "/dashboard",
-) {
+const PASSWORD_MIN_LENGTH = 10;
+
+function resolveRedirectAfterAuth(returnTo: string | null, fallback = "/dashboard") {
   if (returnTo?.startsWith("/") && !returnTo.startsWith("//")) {
     return returnTo;
   }
@@ -35,260 +35,210 @@ function resolveRedirectAfterAuth(
 }
 
 function Auth({ redirectAfterAuth }: AuthProps = {}) {
-  const { isLoading: authLoading, isAuthenticated, signIn } = useAuth();
+  const { isLoading: authLoading, isAuthenticated, signIn, signUp } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const redirect = resolveRedirectAfterAuth(
-    searchParams.get("returnTo"),
-    redirectAfterAuth,
-  );
-  const [step, setStep] = useState<"signIn" | { email: string }>("signIn");
-  const [otp, setOtp] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const redirect = resolveRedirectAfterAuth(searchParams.get("returnTo"), redirectAfterAuth);
+
+  const [mode, setMode] = useState<"signIn" | "signUp">("signIn");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!authLoading && isAuthenticated) {
-      navigate(redirect);
+      navigate(redirect, { replace: true });
     }
   }, [authLoading, isAuthenticated, navigate, redirect]);
-  const handleEmailSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+
+  const switchMode = (next: "signIn" | "signUp") => {
+    setMode(next);
+    setError(null);
+  };
+
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    setIsLoading(true);
+    setIsSubmitting(true);
     setError(null);
     try {
-      const formData = new FormData(event.currentTarget);
-      await signIn("email-otp", formData);
-      setStep({ email: formData.get("email") as string });
-      setIsLoading(false);
-    } catch (error) {
-      console.error("Email sign-in error:", error);
-      setError(
-        error instanceof Error
-          ? error.message
-          : "Failed to send verification code. Please try again.",
-      );
-      setIsLoading(false);
+      if (mode === "signUp") {
+        await signUp({ email, password, displayName: displayName.trim() || undefined });
+      } else {
+        await signIn({ email, password });
+      }
+      navigate(redirect, { replace: true });
+    } catch (caught) {
+      setError(alphaAuthErrorMessage(caught));
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  const handleOtpSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setIsLoading(true);
-    setError(null);
-    try {
-      const formData = new FormData(event.currentTarget);
-      await signIn("email-otp", formData);
-
-      console.log("signed in");
-
-      navigate(redirect);
-    } catch (error) {
-      console.error("OTP verification error:", error);
-
-      setError("The verification code you entered is incorrect.");
-      setIsLoading(false);
-
-      setOtp("");
-    }
-  };
-
-  const handleGuestLogin = async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      console.log("Attempting anonymous sign in...");
-      await signIn("anonymous");
-      console.log("Anonymous sign in successful");
-      navigate(redirect);
-    } catch (error) {
-      console.error("Guest login error:", error);
-      console.error("Error details:", JSON.stringify(error, null, 2));
-      setError(`Failed to sign in as guest: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      setIsLoading(false);
-    }
-  };
+  const longEnough = password.length >= PASSWORD_MIN_LENGTH;
+  const avoidsEmail = email.length === 0 || !password.toLowerCase().includes(email.trim().toLowerCase());
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen bg-background text-foreground">
+      <div className="mx-auto flex max-w-5xl flex-col px-6 py-10">
+        <button
+          type="button"
+          onClick={() => navigate("/")}
+          className="studio-serif w-fit text-lg tracking-tight"
+        >
+          Alpha
+        </button>
+        <Eyebrow className="mt-1">self-owned AI system</Eyebrow>
 
-      
-      {/* Auth Content */}
-      <div className="flex-1 flex items-center justify-center">
-        <div className="flex items-center justify-center h-full flex-col">
-        <Card className="min-w-[350px] pb-0 border shadow-md">
-          {step === "signIn" ? (
-            <>
-              <CardHeader className="text-center">
-              <div className="flex justify-center">
-                    <img
-                      src={logo}
-                      alt="Lock Icon"
-                      width={64}
-                      height={64}
-                      className="rounded-lg mb-4 mt-4 cursor-pointer"
-                      onClick={() => navigate("/")}
-                    />
-                  </div>
-                <CardTitle className="text-xl">Get Started</CardTitle>
-                <CardDescription>
-                  Enter your email to log in or sign up
-                </CardDescription>
-              </CardHeader>
-              <form onSubmit={handleEmailSubmit}>
-                <CardContent>
-                  
-                  <div className="relative flex items-center gap-2">
-                    <div className="relative flex-1">
-                      <Mail className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                      <Input
-                        name="email"
-                        placeholder="name@example.com"
-                        type="email"
-                        className="pl-9"
-                        disabled={isLoading}
-                        required
-                      />
-                    </div>
-                    <Button
-                      type="submit"
-                      variant="outline"
-                      size="icon"
-                      disabled={isLoading}
-                    >
-                      {isLoading ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <ArrowRight className="h-4 w-4" />
-                      )}
-                    </Button>
-                  </div>
-                  {error && (
-                    <p className="mt-2 text-sm text-red-500">{error}</p>
-                  )}
-                  
-                  <div className="mt-4">
-                    <div className="relative">
-                      <div className="absolute inset-0 flex items-center">
-                        <span className="w-full border-t" />
-                      </div>
-                      <div className="relative flex justify-center text-xs uppercase">
-                        <span className="bg-background px-2 text-muted-foreground">
-                          Or
-                        </span>
-                      </div>
-                    </div>
-                    
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="w-full mt-4"
-                      onClick={handleGuestLogin}
-                      disabled={isLoading}
-                    >
-                      <UserX className="mr-2 h-4 w-4" />
-                      Continue as Guest
-                    </Button>
-                  </div>
-                </CardContent>
-              </form>
-            </>
-          ) : (
-            <>
-              <CardHeader className="text-center mt-4">
-                <CardTitle>Check your email</CardTitle>
-                <CardDescription>
-                  We've sent a code to {step.email}
-                </CardDescription>
-              </CardHeader>
-              <form onSubmit={handleOtpSubmit}>
-                <CardContent className="pb-4">
-                  <input type="hidden" name="email" value={step.email} />
-                  <input type="hidden" name="code" value={otp} />
+        <div className="mt-10 grid gap-10 lg:grid-cols-[1fr_minmax(340px,380px)]">
+          {/* Editorial side: says what this account is for, honestly. */}
+          <section className="space-y-6">
+            <h1 className="studio-serif text-3xl leading-tight">
+              {mode === "signUp" ? "Create your Alpha account" : "Sign in to Alpha"}
+            </h1>
+            <p className="max-w-md text-sm leading-6 text-muted-foreground">
+              An Alpha account keeps your training runs, checkpoints, documents, vectors and memories tied to you
+              alone. Alpha resolves every request from the session you create here — the client never names its own
+              identity.
+            </p>
+            <Rule />
+            <ul className="space-y-3 text-xs leading-5 text-muted-foreground">
+              <li className="flex gap-3">
+                <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-chart-2" />
+                <span>
+                  Passwords are stored as a PBKDF2-HMAC-SHA256 derivation with a per-account salt. The password itself
+                  is never written anywhere.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <LockKeyhole className="mt-0.5 size-3.5 shrink-0 text-chart-2" />
+                <span>
+                  Sessions expire after 30 days, stop working after 7 days of inactivity, and can be revoked from the
+                  workspace. Changing your password ends all of them.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-chart-2" />
+                <span>
+                  No external AI provider is involved. Alpha's own model is the engine, and its state —{" "}
+                  <Mono>UNTRAINED</Mono> until a run completes — is shown rather than implied.
+                </span>
+              </li>
+            </ul>
+          </section>
 
-                  <div className="flex justify-center">
-                    <InputOTP
-                      value={otp}
-                      onChange={setOtp}
-                      maxLength={6}
-                      disabled={isLoading}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && otp.length === 6 && !isLoading) {
-                          // Find the closest form and submit it
-                          const form = (e.target as HTMLElement).closest("form");
-                          if (form) {
-                            form.requestSubmit();
-                          }
-                        }
-                      }}
-                    >
-                      <InputOTPGroup>
-                        {Array.from({ length: 6 }).map((_, index) => (
-                          <InputOTPSlot key={index} index={index} />
-                        ))}
-                      </InputOTPGroup>
-                    </InputOTP>
-                  </div>
-                  {error && (
-                    <p className="mt-2 text-sm text-red-500 text-center">
-                      {error}
-                    </p>
-                  )}
-                  <p className="text-sm text-muted-foreground text-center mt-4">
-                    Didn't receive a code?{" "}
-                    <Button
-                      variant="link"
-                      className="p-0 h-auto"
-                      onClick={() => setStep("signIn")}
-                    >
-                      Try again
-                    </Button>
-                  </p>
-                </CardContent>
-                <CardFooter className="flex-col gap-2">
-                  <Button
-                    type="submit"
-                    className="w-full"
-                    disabled={isLoading || otp.length !== 6}
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Verifying...
-                      </>
-                    ) : (
-                      <>
-                        Verify code
-                        <ArrowRight className="ml-2 h-4 w-4" />
-                      </>
-                    )}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={() => setStep("signIn")}
-                    disabled={isLoading}
-                    className="w-full"
-                  >
-                    Use different email
-                  </Button>
-                </CardFooter>
-              </form>
-            </>
-          )}
+          {/* Form side */}
+          <section className="studio-frame h-fit">
+            <div className="flex items-center gap-1 border-b border-border px-4 py-3">
+              {(["signIn", "signUp"] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => switchMode(option)}
+                  className={`rounded-sm px-3 py-1 text-[11px] uppercase tracking-[0.14em] transition-colors ${
+                    mode === option
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {option === "signIn" ? "Sign in" : "Create account"}
+                </button>
+              ))}
+            </div>
 
-          <div className="py-4 px-6 text-xs text-center text-muted-foreground bg-muted border-t rounded-b-lg">
-            Secured by{" "}
-            <a
-              href="https://freebuff.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline hover:text-primary transition-colors"
-            >
-              freebuff.com
-            </a>
-          </div>
-        </Card>
+            <form onSubmit={handleSubmit} className="space-y-4 px-4 py-5">
+              <div className="space-y-1.5">
+                <Label htmlFor="email" className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                  Email
+                </Label>
+                <Input
+                  id="email"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  disabled={isSubmitting}
+                />
+              </div>
+
+              {mode === "signUp" ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="displayName" className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                    Display name <span className="normal-case tracking-normal">(optional)</span>
+                  </Label>
+                  <Input
+                    id="displayName"
+                    name="displayName"
+                    autoComplete="nickname"
+                    value={displayName}
+                    onChange={(event) => setDisplayName(event.target.value)}
+                    placeholder="How Alpha addresses you"
+                    disabled={isSubmitting}
+                  />
+                </div>
+              ) : null}
+
+              <div className="space-y-1.5">
+                <Label htmlFor="password" className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                  Password
+                </Label>
+                <Input
+                  id="password"
+                  name="password"
+                  type="password"
+                  autoComplete={mode === "signUp" ? "new-password" : "current-password"}
+                  required
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  disabled={isSubmitting}
+                />
+                {mode === "signUp" ? (
+                  <ul className="space-y-1 pt-1 text-[11px] leading-4 text-muted-foreground">
+                    <li className={longEnough ? "text-chart-2" : undefined}>
+                      {longEnough ? "✓" : "•"} at least {PASSWORD_MIN_LENGTH} characters
+                    </li>
+                    <li className={avoidsEmail ? "text-chart-2" : undefined}>
+                      {avoidsEmail ? "✓" : "•"} does not contain your email address
+                    </li>
+                    <li>• not a password from published breach lists</li>
+                  </ul>
+                ) : null}
+              </div>
+
+              {error ? (
+                <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-[11px] leading-4 text-foreground">
+                  <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                  <span>{error}</span>
+                </p>
+              ) : null}
+
+              <Button type="submit" className="w-full" disabled={isSubmitting || !email || !password}>
+                {isSubmitting ? (
+                  <Loader2 className="mr-2 size-3.5 animate-spin" />
+                ) : (
+                  <ArrowRight className="mr-2 size-3.5" />
+                )}
+                {mode === "signUp" ? "Create account" : "Sign in"}
+              </Button>
+
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                {mode === "signUp"
+                  ? "Already have an account? Switch to sign in."
+                  : "New here? Switch to create account — no email verification step is involved because Alpha sends no mail."}
+              </p>
+            </form>
+
+            <div className="border-t border-border px-4 py-3">
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                Secured by <span className="text-foreground">Alpha</span> — its own accounts, its own sessions, its own
+                audit log.
+              </p>
+            </div>
+          </section>
         </div>
       </div>
     </div>

@@ -5,6 +5,7 @@ import { requireActorId } from "./helpers";
 /** Automation workflows (trigger + conditions + actions, stored as data). */
 export const saveWorkflow = mutation({
   args: {
+    sessionToken: v.string(),
     workflowId: v.string(),
     name: v.string(),
     description: v.string(),
@@ -15,7 +16,7 @@ export const saveWorkflow = mutation({
     actor: v.string(),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const existing = await ctx.db
       .query("alphaWorkflows")
       .withIndex("by_workflow", (q) => q.eq("workflowId", args.workflowId))
@@ -30,9 +31,9 @@ export const saveWorkflow = mutation({
 });
 
 export const listWorkflows = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaWorkflows")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))
@@ -44,6 +45,7 @@ export const listWorkflows = query({
 /** Workflow executions, including retries and per-action outcomes. */
 export const saveJob = mutation({
   args: {
+    sessionToken: v.string(),
     jobId: v.string(),
     workflowId: v.string(),
     workflowName: v.string(),
@@ -55,7 +57,7 @@ export const saveJob = mutation({
     traceId: v.string(),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaJobs")
       .withIndex("by_workflow", (q) => q.eq("workflowId", args.workflowId))
@@ -70,9 +72,9 @@ export const saveJob = mutation({
 });
 
 export const listJobs = query({
-  args: { limit: v.optional(v.number()) },
+  args: { sessionToken: v.string(), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaJobs")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))

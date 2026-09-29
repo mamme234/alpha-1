@@ -10,6 +10,7 @@ import { requireActorId } from "./helpers";
  */
 export const record = mutation({
   args: {
+    sessionToken: v.string(),
     name: v.string(),
     version: v.string(),
     stage: v.string(),
@@ -21,7 +22,7 @@ export const record = mutation({
     notes: v.array(v.string()),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const existing = await ctx.db
       .query("alphaModels")
       .withIndex("by_actor_name", (q) => q.eq("actorId", actorId).eq("name", args.name))
@@ -36,9 +37,9 @@ export const record = mutation({
 });
 
 export const current = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const models = await ctx.db
       .query("alphaModels")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))
@@ -49,9 +50,9 @@ export const current = query({
 });
 
 export const list = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const models = await ctx.db
       .query("alphaModels")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))

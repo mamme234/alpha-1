@@ -60,7 +60,7 @@ export default function Dashboard() {
             <div className="flex flex-wrap items-center gap-3">
               {snapshot ? <StageBadge stage={snapshot.model.stage} /> : null}
               <span className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
-                {user?.email ?? user?.name ?? "signed in"}
+                {user?.email ?? user?.displayName ?? "signed in"}
               </span>
               <Button variant="ghost" size="sm" onClick={() => navigate("/")}>
                 <Home className="mr-2 size-3.5" />

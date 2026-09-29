@@ -11,6 +11,7 @@ import { requireActorId } from "./helpers";
  */
 export const syncTools = mutation({
   args: {
+    sessionToken: v.string(),
     tools: v.array(
       v.object({
         name: v.string(),
@@ -26,7 +27,7 @@ export const syncTools = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     let written = 0;
     for (const tool of args.tools) {
       const existing = await ctx.db
@@ -45,9 +46,9 @@ export const syncTools = mutation({
 });
 
 export const listTools = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaTools")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))

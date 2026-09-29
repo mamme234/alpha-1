@@ -5,6 +5,7 @@ import { requireActorId } from "./helpers";
 /** Trained tokenizer vocabularies. */
 export const saveTokenizer = mutation({
   args: {
+    sessionToken: v.string(),
     version: v.string(),
     trainedOn: v.string(),
     vocabSize: v.number(),
@@ -14,7 +15,7 @@ export const saveTokenizer = mutation({
     snapshot: v.any(),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const existing = await ctx.db
       .query("alphaTokenizers")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))
@@ -29,9 +30,9 @@ export const saveTokenizer = mutation({
 });
 
 export const currentTokenizer = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaTokenizers")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))
@@ -44,6 +45,7 @@ export const currentTokenizer = query({
 /** Datasets available to Alpha. */
 export const saveDataset = mutation({
   args: {
+    sessionToken: v.string(),
     datasetId: v.string(),
     name: v.string(),
     version: v.string(),
@@ -55,7 +57,7 @@ export const saveDataset = mutation({
     text: v.array(v.string()),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const existing = await ctx.db
       .query("alphaDatasets")
       .withIndex("by_dataset", (q) => q.eq("datasetId", args.datasetId))
@@ -70,9 +72,9 @@ export const saveDataset = mutation({
 });
 
 export const listDatasets = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     return await ctx.db
       .query("alphaDatasets")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))
@@ -83,6 +85,7 @@ export const listDatasets = query({
 /** Checkpoints carry the weights Alpha actually trained. */
 export const saveCheckpoint = mutation({
   args: {
+    sessionToken: v.string(),
     checkpointId: v.string(),
     label: v.string(),
     modelName: v.string(),
@@ -103,7 +106,7 @@ export const saveCheckpoint = mutation({
     config: v.any(),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const existing = await ctx.db
       .query("alphaCheckpoints")
       .withIndex("by_checkpoint", (q) => q.eq("checkpointId", args.checkpointId))
@@ -118,9 +121,9 @@ export const saveCheckpoint = mutation({
 
 /** Checkpoint summaries for the UI — the weight payload stays on the server. */
 export const listCheckpoints = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaCheckpoints")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))
@@ -148,9 +151,9 @@ export const listCheckpoints = query({
 
 /** Full checkpoint including weights — used to resume a run. */
 export const latestCheckpoint = query({
-  args: {},
-  handler: async (ctx) => {
-    const actorId = await requireActorId(ctx);
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaCheckpoints")
       .withIndex("by_actor", (q) => q.eq("actorId", actorId))

@@ -5,6 +5,7 @@ import { requireActorId } from "./helpers";
 /** Alpha's memory records, scoped to the signed-in user. */
 export const upsertMemories = mutation({
   args: {
+    sessionToken: v.string(),
     records: v.array(
       v.object({
         memoryId: v.string(),
@@ -24,7 +25,7 @@ export const upsertMemories = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     let written = 0;
     for (const record of args.records) {
       const existing = await ctx.db
@@ -43,9 +44,9 @@ export const upsertMemories = mutation({
 });
 
 export const list = query({
-  args: { scope: v.optional(v.string()) },
+  args: { sessionToken: v.string(), scope: v.optional(v.string()) },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = args.scope
       ? await ctx.db
           .query("alphaMemories")
@@ -60,9 +61,9 @@ export const list = query({
 });
 
 export const remove = mutation({
-  args: { memoryId: v.string() },
+  args: { sessionToken: v.string(), memoryId: v.string() },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const existing = await ctx.db
       .query("alphaMemories")
       .withIndex("by_memory", (q) => q.eq("memoryId", args.memoryId))
@@ -74,9 +75,9 @@ export const remove = mutation({
 });
 
 export const clearScope = mutation({
-  args: { scope: v.string() },
+  args: { sessionToken: v.string(), scope: v.string() },
   handler: async (ctx, args) => {
-    const actorId = await requireActorId(ctx);
+    const actorId = await requireActorId(ctx, args.sessionToken);
     const rows = await ctx.db
       .query("alphaMemories")
       .withIndex("by_scope", (q) => q.eq("actorId", actorId).eq("scope", args.scope))
