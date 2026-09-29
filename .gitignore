@@ -1,0 +1,36 @@
+.env.local
+node_modules
+dist
+src/convex/_generated
+
+# Secrets — never commit these. Alpha uses no AI provider keys, and no key of
+# any kind belongs in this repository.
+.env
+.env.*
+!.env.example
+
+# Build and tooling output
+build
+coverage
+*.tsbuildinfo
+.vite
+.turbo
+
+# Local Alpha artifacts. Model weights are produced by training, not shipped:
+# they live in Convex (see src/convex/alpha) or in a local directory.
+.alpha/
+*.checkpoint.json
+*.weights.json
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+bun-error.log*

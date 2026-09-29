@@ -1,0 +1,84 @@
+{
+  "preset": "micro",
+  "model": {
+    "name": "alpha-micro",
+    "version": "0.1.0",
+    "vocabSize": 768,
+    "contextLength": 96,
+    "dModel": 96,
+    "nHeads": 6,
+    "nLayers": 3,
+    "dFeedForward": 384,
+    "dropout": 0.05,
+    "normEps": 1e-05,
+    "positionalEncoding": "learned",
+    "tieEmbeddings": true,
+    "initStd": 0.02
+  },
+  "tokenizer": {
+    "targetVocabSize": 512,
+    "version": "0.1.0",
+    "specialTokens": {
+      "pad": "<pad>",
+      "unk": "<unk>",
+      "bos": "<bos>",
+      "eos": "<eos>"
+    }
+  },
+  "training": {
+    "batchSize": 8,
+    "seqLen": 64,
+    "totalSteps": 200,
+    "learningRate": 0.002,
+    "schedule": "cosine",
+    "warmupSteps": 20,
+    "minFactor": 0.1,
+    "weightDecay": 0.01,
+    "gradClipNorm": 1,
+    "evalInterval": 25,
+    "evalBatches": 6,
+    "validationFraction": 0.12,
+    "seed": 1337,
+    "checkpointInterval": 50
+  },
+  "rag": {
+    "chunkTokens": 72,
+    "overlapTokens": 16,
+    "topK": 5,
+    "minScore": 0.05,
+    "maxContextTokens": 384
+  },
+  "memory": {
+    "recencyHalfLifeHours": 72,
+    "similarityWeight": 0.6,
+    "importanceWeight": 0.25,
+    "usageWeight": 0.15,
+    "maxPerScope": 1024
+  },
+  "security": {
+    "approvalTtlMs": 300000,
+    "sandbox": {
+      "maxSteps": 8,
+      "maxGeneratedTokens": 2048,
+      "maxDurationMs": 180000,
+      "allowNetwork": false,
+      "allowFileSystem": false
+    },
+    "rateLimits": {
+      "inference": 60,
+      "tool": 40,
+      "agent": 12,
+      "workflow": 24
+    }
+  },
+  "automation": {
+    "maxAttempts": 3,
+    "baseRetryDelayMs": 250,
+    "historyLimit": 300
+  },
+  "observability": {
+    "logLevel": "info",
+    "sampleWindow": 1000,
+    "maxSpans": 8000
+  }
+}

@@ -1,0 +1,161 @@
+/* DO NOT CHANGE */
+@import "tailwindcss";
+@import "tw-animate-css";
+@custom-variant dark (&:is(.dark *));
+
+/* DO NOT CHANGE */
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  /* Editorial type: a system serif for display, sans for interface text. */
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", "Times New Roman", serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+/* CHANGE VALUES FOR THEME */
+/*
+ * Studio theme — gallery-clean and refined.
+ * Warm off-whites, hairline framing, muted neutrals, careful spacing and a soft
+ * editorial presentation. Colour is reserved for real state (UNTRAINED, IN
+ * DEVELOPMENT, READY), never for decoration.
+ */
+:root {
+  --radius: 0.375rem;
+  --background: oklch(0.976 0.006 85);
+  --foreground: oklch(0.255 0.012 60);
+  --card: oklch(0.991 0.004 85);
+  --card-foreground: oklch(0.255 0.012 60);
+  --popover: oklch(0.991 0.004 85);
+  --popover-foreground: oklch(0.255 0.012 60);
+  --primary: oklch(0.315 0.018 55);
+  --primary-foreground: oklch(0.982 0.005 85);
+  --secondary: oklch(0.955 0.008 85);
+  --secondary-foreground: oklch(0.3 0.014 60);
+  --muted: oklch(0.953 0.008 85);
+  --muted-foreground: oklch(0.515 0.012 70);
+  --accent: oklch(0.935 0.014 82);
+  --accent-foreground: oklch(0.295 0.02 60);
+  --destructive: oklch(0.522 0.165 27);
+  --border: oklch(0.895 0.008 80);
+  --input: oklch(0.91 0.008 80);
+  --ring: oklch(0.72 0.018 70);
+  --chart-1: oklch(0.6 0.11 42);
+  --chart-2: oklch(0.6 0.05 155);
+  --chart-3: oklch(0.52 0.04 245);
+  --chart-4: oklch(0.74 0.09 82);
+  --chart-5: oklch(0.58 0.07 28);
+  --sidebar: oklch(0.966 0.006 85);
+  --sidebar-foreground: oklch(0.255 0.012 60);
+  --sidebar-primary: oklch(0.315 0.018 55);
+  --sidebar-primary-foreground: oklch(0.982 0.005 85);
+  --sidebar-accent: oklch(0.94 0.012 82);
+  --sidebar-accent-foreground: oklch(0.295 0.02 60);
+  --sidebar-border: oklch(0.895 0.008 80);
+  --sidebar-ring: oklch(0.72 0.018 70);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
+  }
+  button:not([disabled]),
+  [role="button"]:not([disabled]) {
+    cursor: pointer;
+  }
+}
+
+/*
+ * Studio helpers.
+ * Small shared classes for the workspace: hairline rules, the small-caps
+ * eyebrow label, and a matte frame that reads like a gallery mount.
+ */
+@layer components {
+  .studio-rule {
+    @apply h-px w-full bg-border;
+  }
+  .studio-eyebrow {
+    @apply text-[10px] font-medium uppercase tracking-[0.22em] text-muted-foreground;
+  }
+  .studio-frame {
+    @apply rounded-md border border-border bg-card;
+  }
+  .studio-muted-surface {
+    @apply rounded-md border border-border bg-muted/40;
+  }
+  .studio-serif {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+}
