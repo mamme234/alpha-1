@@ -9,6 +9,7 @@
 
 import { Button } from "@/components/ui/button";
 import { StageBadge } from "@/components/alpha/studio";
+import { AccountPanel } from "@/components/alpha/panels/AccountPanel";
 import { GovernancePanel } from "@/components/alpha/panels/GovernancePanel";
 import { InferencePanel } from "@/components/alpha/panels/InferencePanel";
 import { KnowledgePanel } from "@/components/alpha/panels/KnowledgePanel";
@@ -29,6 +30,7 @@ const TABS = [
   { id: "knowledge", label: "Knowledge", hint: "rag · vectors · memory" },
   { id: "work", label: "Work", hint: "agents · tools · automation" },
   { id: "governance", label: "Governance", hint: "security · traces" },
+  { id: "account", label: "Account", hint: "profile · sessions" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -160,6 +162,7 @@ export default function Dashboard() {
               {tab === "knowledge" ? <KnowledgePanel alpha={alpha} /> : null}
               {tab === "work" ? <WorkPanel alpha={alpha} /> : null}
               {tab === "governance" ? <GovernancePanel alpha={alpha} /> : null}
+              {tab === "account" ? <AccountPanel /> : null}
             </>
           )}
         </div>

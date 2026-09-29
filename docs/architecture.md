@@ -10,6 +10,17 @@ path given, and every status matches
 
 ## Status of each module
 
+Alpha's application layer is separate from its AI stack, and each layer has its
+own status.
+
+| Layer | Path | Status | Meaning of that status |
+| --- | --- | --- | --- |
+| Authentication | `src/convex/alphaAuth` | **READY** | Alpha's own accounts and sessions; verified end to end against a live deployment |
+| API / backend | `src/convex` | **IN DEVELOPMENT** | Domain-separated and session-scoped; served over Convex functions, no transport-neutral HTTP surface yet |
+| Conversations | `src/convex/alpha/conversations.ts` | **READY** | Stored transcripts with the model stage that produced each turn |
+
+Inside the AI stack:
+
 | Module | Path | Status | Meaning of that status |
 | --- | --- | --- | --- |
 | Core | `src/alpha/core` | **READY** | Complete; gradients verified numerically in tests |
@@ -29,6 +40,63 @@ path given, and every status matches
 | Automation | `src/alpha/automation` | **READY** | Workflows, conditions, queue, retries, history |
 | Security | `src/alpha/security` | **READY** | Policy, validation, rate limits, audit chain, sandboxes |
 | Observability | `src/alpha/observability` | **READY** | Spans, metrics, logs, cross-module recording |
+
+---
+
+## The application boundary
+
+```
+ALPHA APP            src/pages, src/components, src/hooks   React + Vite, Studio theme
+   │  useAuth() → session token; api.alpha.* calls carry it
+   ▼
+ALPHA AUTHENTICATION src/convex/alphaAuth                    accounts, sessions, revocation
+   │  resolveSession(token) → account
+   ▼
+ALPHA API / BACKEND  src/convex/*                            one module per domain
+   │  requireActorId(ctx, sessionToken)
+   ▼
+ALPHA AI RUNTIME     src/alpha                               framework-free, no backend import
+   │  AlphaWorkspace
+   ▼
+ALPHA LLM CORE       src/alpha/model, core                   decoder-only transformer
+```
+
+The AI runtime has **no dependency on the application layer** — no React, no
+Vite, no Convex. That is the property that makes other clients possible: a CLI
+or an Android app can construct an `AlphaWorkspace` and host the runtime itself,
+while the browser app happens to run it in a tab and persist to Convex through
+an injected adapter.
+
+### `alphaAuth` — identity
+
+Accounts, sessions, password derivation and revocation. Passwords are derived
+with PBKDF2-HMAC-SHA256 in an actions-only path; sessions are opaque tokens
+stored as `sha256(token)` with absolute expiry, idle expiry and revocation.
+`requireActorId` is the single place a caller becomes an account. The full
+model, including what is *not* implemented, is in
+[`docs/authentication.md`](authentication.md).
+
+### `src/convex` — the API surface
+
+One module per responsibility, so a domain can be read, reviewed and changed on
+its own:
+
+| Domain | Module |
+| --- | --- |
+| authentication | `alphaAuth/` (crypto, validation, sessions, actions, maintenance) |
+| user data | `users.ts` |
+| conversations | `alpha/conversations.ts` |
+| model management | `alpha/models.ts`, `alpha/training.ts` |
+| memory | `alpha/memory.ts` |
+| RAG and vectors | `alpha/vector.ts` |
+| tools | `alpha/tools.ts` |
+| agents and automation | `alpha/workflows.ts` |
+| observability | `alpha/observability.ts` |
+| security | `alpha/observability.ts` (audit) + `alphaAuth` (security events) |
+| HTTP | `http.ts` (health check only) |
+
+Every function in `alpha/*` takes a `sessionToken` and resolves its account
+before touching data. No handler accepts an owner id as an argument.
 
 ---
 

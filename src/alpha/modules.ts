@@ -13,6 +13,31 @@ import type { AlphaModuleDescriptor } from "./core/types";
 
 export const ALPHA_MODULES: AlphaModuleDescriptor[] = [
   {
+    id: "auth",
+    name: "Alpha Authentication",
+    summary:
+      "Alpha's own accounts and sessions: PBKDF2-HMAC-SHA256 passwords, hashed session tokens, absolute and idle expiry, per-session and account-wide revocation.",
+    status: "ready",
+    notes: [
+      "No identity provider is involved. Registration, sign-in, sign-out and password change are Alpha functions in src/convex/alphaAuth.",
+      "A session token is stored only as sha256(token); the plaintext exists only in the client that created it.",
+      "Failed sign-ins are counted and lock the account; a password change retires every existing session.",
+      "Session tokens are held in browser localStorage because Alpha's API is called directly rather than over cookies — see docs/authentication.md.",
+    ],
+  },
+  {
+    id: "api",
+    name: "Alpha API",
+    summary:
+      "The application boundary: authentication, user data, model management, conversations, memory, vectors, tools, agents, RAG, observability and security, each with its own module.",
+    status: "in-development",
+    notes: [
+      "Every Alpha function resolves its account from a session, so an owner can never be chosen by the client.",
+      "The AI runtime itself (src/alpha) is framework-free and has no backend dependency, so other clients can host it without this API.",
+      "Served over Convex functions today. A transport-neutral HTTP surface with token auth is planned, not built.",
+    ],
+  },
+  {
     id: "core",
     name: "Alpha Core",
     summary: "Tensor engine and reverse-mode autodiff with analytic gradients for every operation.",

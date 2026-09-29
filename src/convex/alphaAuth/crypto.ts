@@ -121,7 +121,12 @@ export function constantTimeEqual(a: string, b: string): boolean {
   return difference === 0;
 }
 
-async function derivePassword(password: string, salt: string, iterations: number): Promise<string> {
+/**
+ * The derivation itself. Exported so a record at an older work factor can be
+ * built and verified in tests; `createPasswordRecord` and `verifyPassword` are
+ * the two intended entry points.
+ */
+export async function derivePasswordKey(password: string, salt: string, iterations: number): Promise<string> {
   const saltBytes = fromBase64Url(salt);
   const key = await crypto.subtle.importKey(
     "raw",
@@ -143,7 +148,7 @@ export async function createPasswordRecord(
   password: string,
 ): Promise<{ hash: string; salt: string; iterations: number; algorithm: string }> {
   const salt = toBase64Url(randomBytes(ALPHA_PASSWORD_SALT_BYTES));
-  const hash = await derivePassword(password, salt, ALPHA_PASSWORD_ITERATIONS);
+  const hash = await derivePasswordKey(password, salt, ALPHA_PASSWORD_ITERATIONS);
   return {
     hash,
     salt,
@@ -164,7 +169,7 @@ export async function verifyPassword(
   if (record.algorithm !== ALPHA_PASSWORD_ALGORITHM) {
     throw new Error(`unsupported password algorithm: ${record.algorithm}`);
   }
-  const candidate = await derivePassword(password, record.salt, record.iterations);
+  const candidate = await derivePasswordKey(password, record.salt, record.iterations);
   return {
     valid: constantTimeEqual(candidate, record.hash),
     needsRehash: record.iterations < ALPHA_PASSWORD_ITERATIONS,

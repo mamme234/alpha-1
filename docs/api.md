@@ -295,3 +295,87 @@ parseAlphaConfig(json);              // validated, merged over defaults
 ```
 
 Complete examples live in `configs/`.
+
+---
+
+# Application API
+
+Everything above is the AI stack (`src/alpha`), which is framework-free and can
+run in any JavaScript host. The application layer sits on top of it and is
+documented here because it is the interface a client actually uses.
+
+## Authentication (client)
+
+```tsx
+import { useAuth } from "@/hooks/use-auth";
+
+const {
+  status,            // "loading" | "signed-in" | "signed-out"
+  isAuthenticated,
+  user,              // { id, email, displayName, role, status, createdAt, lastSignInAt } | null
+  session,           // { createdAt, expiresAt, lastSeenAt, userAgent } | null
+  sessions,          // active sessions on the account, with `current`
+  sessionToken,
+  signIn,            // (credentials) => Promise<user>
+  signUp,            // (credentials + displayName?) => Promise<user>
+  signOut,           // () => Promise<void>
+  signOutEverywhere, // () => Promise<void>
+  revokeSession,     // (sessionId) => Promise<void>
+  changePassword,    // ({ currentPassword, newPassword }) => Promise<void>
+  error,
+  clearError,
+} = useAuth();
+```
+
+`AlphaAuthProvider` (exported from the same module) wraps the app once in
+`src/main.tsx`. Calls that fail reject with the server's message;
+`alphaAuthErrorMessage(error)` turns any thrown value into something printable.
+
+## Authentication and data (backend)
+
+```ts
+import { api } from "@/convex/_generated/api";
+
+// Every Alpha function takes the session token and resolves the account itself.
+await api.alphaAuth.actions.register({ email, password, displayName, userAgent });
+await api.alphaAuth.actions.signIn({ email, password, userAgent });
+await api.alphaAuth.actions.changePassword({ token, currentPassword, newPassword });
+await api.alphaAuth.sessions.current({ token });        // { user, session } | null
+await api.alphaAuth.sessions.listMine({ token });         // active sessions
+await api.alphaAuth.sessions.signOut({ token });
+await api.alphaAuth.sessions.signOutEverywhere({ token });
+await api.users.currentUser({ sessionToken });
+await api.users.updateDisplayName({ sessionToken, displayName });
+```
+
+Operator-only (internal, unreachable from a client):
+
+```bash
+bunx convex run alphaAuth/maintenance:purgeEndedSessions '{"olderThanMs":0}'
+bunx convex run alphaAuth/maintenance:removeAccount '{"emailKey":"someone@example.com"}'
+```
+
+## Conversations
+
+```ts
+const { conversationId } = await api.alpha.conversations.start({ sessionToken, title, kind });
+await api.alpha.conversations.appendMessage({
+  sessionToken,
+  conversationId,
+  role: "assistant",       // user | assistant | system
+  content,
+  sources,                 // [{ title, score, chunkId }]
+  modelStage,              // which Alpha produced this turn
+  tokens,
+});
+await api.alpha.conversations.list({ sessionToken, limit });
+await api.alpha.conversations.get({ sessionToken, conversationId });
+await api.alpha.conversations.rename({ sessionToken, conversationId, title });
+await api.alpha.conversations.remove({ sessionToken, conversationId });
+```
+
+Each assistant turn records the `modelStage` that produced it, so a stored
+transcript cannot later be read as though a finished model wrote it.
+
+See [`docs/authentication.md`](authentication.md) for the security model behind
+these calls, and [`docs/setup.md`](setup.md) for environment variables.

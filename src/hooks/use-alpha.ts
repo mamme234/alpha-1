@@ -27,7 +27,7 @@ import {
   type TrainingConfig,
   type TrainingSummary,
 } from "@/alpha";
-import { useConvex, useMutation } from "convex/react";
+import { useConvex, useMutation, useQuery } from "convex/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type TrainingProgress = {
@@ -111,6 +111,66 @@ export function useAlpha() {
     syncTools: (args) => syncTools({ ...args, sessionToken: requireToken() }),
   };
 
+  // Conversations live in Alpha's own tables so a transcript survives a reload.
+  const startConversation = useMutation(api.alpha.conversations.start);
+  const appendMessage = useMutation(api.alpha.conversations.appendMessage);
+  const removeConversation = useMutation(api.alpha.conversations.remove);
+  const conversations =
+    useQuery(api.alpha.conversations.list, sessionToken ? { sessionToken } : "skip") ?? [];
+  const conversationRef = useRef<string | null>(null);
+
+  /**
+   * Store one exchange. Best-effort by design: a storage problem must never
+   * lose the generation the user just watched appear.
+   */
+  const recordTurn = useCallback(
+    async (turn: {
+      prompt: string;
+      answer: string;
+      mode: "generate" | "rag";
+      result: GenerationResult | null;
+      sources: RagAnswer["sources"];
+    }) => {
+      try {
+        const token = requireToken();
+        if (!token) return;
+        let conversationId = conversationRef.current;
+        if (!conversationId) {
+          const created = await startConversation({ sessionToken: token, title: turn.prompt.slice(0, 80), kind: turn.mode });
+          conversationId = created.conversationId;
+          conversationRef.current = conversationId;
+        }
+        await appendMessage({ sessionToken: token, conversationId, role: "user", content: turn.prompt });
+        await appendMessage({
+          sessionToken: token,
+          conversationId,
+          role: "assistant",
+          content: turn.answer,
+          sources: turn.sources.map((source) => ({
+            title: source.title,
+            score: source.score,
+            chunkId: source.chunkId,
+          })),
+          modelStage: turn.result?.modelStage,
+          tokens: turn.result?.generatedTokens,
+        });
+      } catch (error) {
+        console.warn("[alpha] conversation not stored:", error);
+      }
+    },
+    [appendMessage, startConversation],
+  );
+
+  const deleteConversation = useCallback(
+    async (conversationId: string) => {
+      const token = requireToken();
+      if (!token) return;
+      await removeConversation({ sessionToken: token, conversationId });
+      if (conversationRef.current === conversationId) conversationRef.current = null;
+    },
+    [removeConversation],
+  );
+
   const [workspace, setWorkspace] = useState<AlphaWorkspace | null>(null);
   const [snapshot, setSnapshot] = useState<AlphaWorkspaceSnapshot | null>(null);
   const [training, setTraining] = useState<TrainingProgress | null>(null);
@@ -141,6 +201,8 @@ export function useAlpha() {
         await ws.initialise();
         if (cancelled) return;
         runtime = { actorId, workspace: ws };
+        // A different account gets its own transcript.
+        conversationRef.current = null;
         const initial = ws.snapshot();
         setWorkspace(ws);
         setSnapshot(initial);
@@ -340,6 +402,13 @@ export function useAlpha() {
             },
             ...previous,
           ]);
+          await recordTurn({
+            prompt,
+            answer: answer.answer,
+            mode,
+            result: answer.generation,
+            sources: answer.sources,
+          });
           setStreaming(null);
           return answer;
         }
@@ -356,6 +425,7 @@ export function useAlpha() {
             { id, prompt, answer: result.text, result, sources: [], mode, at: Date.now() },
             ...previous,
           ]);
+          await recordTurn({ prompt, answer: result.text, mode, result, sources: [] });
         }
         setStreaming(null);
         return result;
@@ -368,7 +438,7 @@ export function useAlpha() {
         setSnapshot(active.snapshot());
       }
     },
-    [],
+    [recordTurn],
   );
 
   const ingest = useCallback(
@@ -463,6 +533,8 @@ export function useAlpha() {
       turns,
       agentRuns,
       streaming,
+      conversations,
+      deleteConversation,
       dataset: ALPHA_SEED_CORPUS,
       datasetInfo: datasetStats(ALPHA_SEED_CORPUS),
       ready: Boolean(workspace && snapshot),
@@ -491,6 +563,8 @@ export function useAlpha() {
       turns,
       agentRuns,
       streaming,
+      conversations,
+      deleteConversation,
       refresh,
       train,
       resumeFromStored,

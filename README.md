@@ -63,7 +63,7 @@ If a capability is architected but unfinished, the code throws
 
 ```bash
 bun install
-bun run test          # 96+ tests: gradient checks, training, retrieval, security
+bun run test          # 120+ tests: gradients, training, retrieval, security, auth
 bun run typecheck     # tsc -b --noEmit
 bun run dev           # Vite dev server (the platform runs this for you)
 ```
@@ -101,24 +101,62 @@ src/alpha/                  the AI stack — framework-free TypeScript
   workspace.ts              composition root (wires every module together)
   tests/                    vitest suites, including numerical gradient checks
 
-src/convex/                 Alpha's own persistence (Convex) + auth
+src/convex/                 Alpha's own backend: API, persistence, authentication
+  alphaAuth/                accounts, sessions, password derivation, maintenance
+  alpha/                    one module per domain (models, training, vectors,
+                            memory, conversations, tools, workflows, observability)
+  users.ts, http.ts         user data, health endpoint
 src/components/alpha/       workspace UI (Studio theme)
 src/pages/                  landing, auth, workspace
-docs/                       architecture, model, training, inference, API, setup
+docs/                       architecture, authentication, model, training,
+                            inference, API, setup, development
 configs/                    example configuration files
 ```
+
+## The application layer
+
+```
+ALPHA APP             React + Vite, Studio theme
+   │  useAuth() → session token
+   ▼
+ALPHA AUTHENTICATION  src/convex/alphaAuth      accounts, sessions, revocation
+   │  resolveSession(token) → account
+   ▼
+ALPHA API / BACKEND   src/convex/*              one module per domain
+   │  requireActorId(ctx, sessionToken)
+   ▼
+ALPHA AI RUNTIME      src/alpha                 framework-free, no backend import
+   │  AlphaWorkspace
+   ▼
+ALPHA LLM CORE        src/alpha/model, core     decoder-only transformer
+```
+
+**Alpha owns its accounts.** There is no identity provider: registration,
+sign-in, sign-out, session expiry and revocation are Alpha functions over
+Alpha's own tables. Passwords are derived with PBKDF2-HMAC-SHA256 and a
+per-account salt; a session token is stored only as `sha256(token)`, expires
+absolutely after 30 days, stops working after 7 days idle, and can be revoked
+individually or account-wide. The full model — including what is *not* built,
+such as an HTTP cookie layer — is in
+[`docs/authentication.md`](docs/authentication.md).
 
 The app layer is thin on purpose: it imports from `src/alpha` only through
 [`src/alpha/index.ts`](src/alpha/index.ts), the public API surface, and stores
 artifacts in Convex tables (`alphaModels`, `alphaCheckpoints`, `alphaVectors`,
-`alphaMemories`, `alphaRuns`, `alphaSpans`, `alphaAuditLogs`, …). Convex is the
-database here, never a model provider.
+`alphaMemories`, `alphaConversations`, `alphaRuns`, `alphaSpans`,
+`alphaAuditLogs`, …). Convex is the database here, never a model provider.
+
+The AI runtime has **no dependency on the app layer** — no React, no Vite, no
+Convex. That is what makes other clients possible: a CLI or an Android app can
+construct an `AlphaWorkspace` and host the runtime itself, and persistence is an
+injected adapter rather than a built-in assumption.
 
 ## Documentation
 
 | Document | Covers |
 | --- | --- |
 | [`docs/architecture.md`](docs/architecture.md) | every module, its interface, data flows, and its real status |
+| [`docs/authentication.md`](docs/authentication.md) | Alpha's accounts and sessions, the security model, and what is not built |
 | [`docs/model.md`](docs/model.md) | the transformer, configuration, parameter counts, versioning and stages |
 | [`docs/training.md`](docs/training.md) | corpus, tokenizer training, the training loop, checkpoints, resuming |
 | [`docs/inference.md`](docs/inference.md) | sampling, streaming, stop conditions, embeddings, what is missing |
@@ -130,13 +168,16 @@ database here, never a model provider.
 ## Working in this repository
 
 - **Package manager:** bun.
-- **Auth:** use `useAuth()` from `@/hooks/use-auth`. Do not modify
-  `src/convex/auth.ts`, `src/convex/auth.config.ts` or
-  `src/convex/auth/emailOtp.ts`.
+- **Auth:** use `useAuth()` from `@/hooks/use-auth`. Alpha owns identity in
+  `src/convex/alphaAuth` — do not add an identity provider, and do not let a
+  component touch session storage directly.
 - **Protected routes:** wrap them in `RequireAuth`, which preserves the
   requested path in `/auth?returnTo=…`.
-- **Persistence:** mutations in `src/convex/alpha/` are scoped to the signed-in
-  user and are the only writer for Alpha artifacts.
+- **API calls:** every Alpha function takes a `sessionToken` and resolves the
+  account with `requireActorId` before touching data. Never accept an owner id
+  from the client.
+- **Persistence:** mutations in `src/convex/alpha/` are the only writer for
+  Alpha artifacts.
 - **Never** add an external AI provider, a model download or an API key for a
   hosted model. That constraint is the point of the project.
 

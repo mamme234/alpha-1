@@ -236,11 +236,13 @@ export default function Landing() {
               <div className="max-w-2xl space-y-4">
                 <p className="studio-eyebrow">Repository layout</p>
                 <h2 className="studio-serif text-3xl leading-tight tracking-tight">
-                  Sixteen modules, one directory each.
+                  {ALPHA_MODULES.length} modules, one directory each.
                 </h2>
                 <p className="text-sm leading-6 text-muted-foreground">
                   The tree mirrors the architecture: <span className="font-mono text-xs">src/alpha/&lt;module&gt;</span> holds one
-                  subsystem with a documented interface, its own tests, and a status that reflects reality.
+                  subsystem with a documented interface, its own tests, and a status that reflects reality. Authentication
+                  and the API live in <span className="font-mono text-xs">src/convex</span>, because they are the application,
+                  not the model.
                 </p>
               </div>
               <Sigma className="size-6 text-border" />
