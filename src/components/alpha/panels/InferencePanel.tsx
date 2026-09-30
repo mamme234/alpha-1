@@ -431,9 +431,27 @@ export function InferencePanel({ alpha }: { alpha: AlphaRuntime }) {
                   <Mono>{turn.mode === "rag" ? "with retrieval" : "raw generation"}</Mono>
                 </div>
                 <p className="mt-2 font-mono text-[11px] text-muted-foreground">› {turn.prompt}</p>
-                <pre className="mt-1 whitespace-pre-wrap font-mono text-xs leading-5 text-foreground">
-                  {turn.answer || "(no tokens)"}
-                </pre>
+                {turn.error ? (
+                  <p className="mt-1 text-[11px] leading-4 text-destructive">{turn.error}</p>
+                ) : (
+                  <pre className="mt-1 whitespace-pre-wrap font-mono text-xs leading-5 text-foreground">
+                    {turn.answer || "(no tokens)"}
+                  </pre>
+                )}
+                {turn.result ? (
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                    <span>request: {turn.requestId}</span>
+                    <span>decoding: {turn.result.decoding}</span>
+                    <span>mean NLL: {turn.result.meanNll.toFixed(4)}</span>
+                    <span>stop: {turn.result.stopReason}</span>
+                    <span>{turn.result.latencyMs} ms</span>
+                  </div>
+                ) : (
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                    <span>request: {turn.requestId}</span>
+                    <span>no generation result recorded</span>
+                  </div>
+                )}
               </div>
             ))}
           </div>

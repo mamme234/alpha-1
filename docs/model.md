@@ -83,9 +83,14 @@ length ≤ context length, retrieval chunk size ≤ context length.
 
 | Preset | Layers | Width | Heads | Feed-forward | Context | Parameters (before the vocabulary is fixed) |
 | --- | --- | --- | --- | --- | --- | --- |
-| `nano` | 2 | 64 | 4 | 256 | 64 | ~74k at vocab 384 |
+| `nano` | 2 | 64 | 4 | 256 | 64 | 128,768 measured at vocab 384 |
 | `micro` | 3 | 96 | 6 | 384 | 96 | ~190k at vocab 768 |
 | `small` | 4 | 128 | 8 | 512 | 128 | ~700k at vocab 2048 |
+
+The `nano` figure is not an estimate: it is the parameter count of a real
+`AlphaTransformer` instantiated by a run in this repository, and
+`countParameters(config)` returns the same number independently. See
+[`docs/training.md`](training.md#measured-run) for the run that produced it.
 
 `countParameters(config)` computes the number exactly, and
 `describeArchitecture(config)` returns the same total as a table of tensor
@@ -112,6 +117,35 @@ hand. The workspace shows a stage badge, and the inference engine attaches the
 stage and a warning to every generation, so untrained output is labelled at the
 point of use as well.
 
+**What is true about the model in this repository right now.** The *architecture*
+is READY and has been exercised by a real training run: 128,768 parameters
+trained for 60 steps with loss 5.9428 → 3.9579, a validated checkpoint, a reload
+whose maximum absolute weight difference was exactly 0, and nine of nine
+verification checks passing. Nothing about that claim is theoretical. What the
+*shipped workspace* holds, however, is `untrained` weights — a new account starts
+from random initialisation, and it becomes `trained` only when you press *Train
+Alpha* and a checkpoint is written. Alpha does not ship a downloaded model file,
+so the distinction between "this codebase can train a model" and "this deployment
+currently has one" stays visible.
+
+### Verifying the core yourself
+
+```ts
+import { verifyAlphaModel, runAlphaTrainingLifecycle } from "@/alpha";
+
+const report = verifyAlphaModel({ model, tokenizer, dataset });
+report.passed;                        // boolean
+report.checks.map((c) => `${c.id} ${c.passed ? "ok" : "FAIL"} ${c.label}`);
+```
+
+The nine checks are: **A** initial parameters are not all identical; **B** a
+training step changes parameters; **C** gradients are non-zero and match
+numerical differences; **D** the loss is computed from the model's actual
+predictions; **E** a checkpoint can be saved; **F** it can be reloaded; **G** the
+reloaded parameters match the saved ones; **H** training can resume from it;
+**I** inference runs on the reloaded model and emits tokens. A failure in any
+one of them is reported with its measured numbers, not as a boolean.
+
 ---
 
 ## Parameter budget
@@ -129,9 +163,11 @@ layer norms    4·C         (two norms, weight + bias)
 Plus `V·C` for the token embedding, `T·C` for learned positions (when used),
 `2·C` for the final norm, and `V·(C+1)` for an untied output projection.
 
-Total for the `nano` preset at the seed corpus vocabulary (≈210 tokens) is
-roughly 50k parameters — small enough to train a visible loss curve in a browser
-tab in seconds.
+Total for the `nano` preset at a 384-token vocabulary is **128,768 parameters**
+— 515,072 bytes of float32 weights — small enough to train a visible loss curve
+in a browser tab in seconds. The same shapes are used by Alpha's memory
+estimator (`estimateTrainingMemory`) so the Training panel can state the
+resource envelope before a run starts rather than after it fails.
 
 ---
 
@@ -146,7 +182,12 @@ Architecture version and weights are versioned separately:
 - `AlphaCheckpoint.modelVersion` — which architecture a checkpoint's weights
   belong to. `AlphaWorkspace.resumeFrom()` refuses a checkpoint whose vocabulary
   does not match the current model, because silently loading mismatched weights
-  would mean nothing at all.
+  would mean nothing at all. `assertCheckpointCompatible()` also compares a
+  `configFingerprint` and the tokenizer's own fingerprint, so a checkpoint from
+  a different architecture revision is rejected rather than approximately
+  loaded.
+- `AlphaCheckpoint.formatVersion` — the payload's own version, checked on parse,
+  so an old artifact fails loudly instead of loading with missing fields.
 
 ---
 

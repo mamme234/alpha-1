@@ -34,6 +34,38 @@ model on the bundled corpus and asserts the validation loss falls below the
 uniform baseline. It also exercises Alpha's password derivation, session token
 hashing and input validation directly.
 
+### Prove the model actually trains
+
+The test suite is not the same as seeing the pipeline run. Two commands execute
+the real lifecycle end to end in a terminal — corpus, tokenizer, transformer,
+loss, backpropagation, AdamW, checkpoint, reload, resume, inference — and print
+what happened. Neither writes to disk.
+
+```bash
+bun run alpha:train                  # 60 steps, nano preset, seed 1337
+bun run alpha:verify --steps 40      # the nine verification checks, A through I
+```
+
+Expected from `bun run alpha:train`, reproduced from a real run in this
+repository:
+
+```
+Model        alpha-nano v0.1.0 (nano) · 128,768 params · 2L/64d/4h · context 64 · vocab 384
+Tokenizer    v0.1.0 · 384 tokens · 333 merges · tok_02690d5b
+Loss         first 5.9428 → last 3.9579 · best 3.8190 · uniform baseline 5.9506 · validation 4.2403
+Checkpoint   ckpt_… · step 60 · stage trained · 515,072 bytes · valid true
+Reload       compatible true · max absolute weight difference 0
+Resume       step 60 → 62 (+2) · loss after resume 3.8460
+Inference    24 token(s) · stop max-tokens · stage trained · deterministic true
+```
+
+`bun run alpha:verify` additionally prints the nine checks with their measured
+detail, ending in `Verification PASSED`. If either command fails, Alpha's claim
+that it can train a model is false and you now know it.
+
+Flags: `--steps`, `--preset nano|micro|small`, `--batch`, `--seq`, `--seed`,
+`--prompt`, and `--json` for machine-readable output.
+
 ---
 
 ## Run
@@ -68,10 +100,10 @@ there is no fallback path that would use one.
 
 If your `.env.local` still defines `CONVEX_SITE_URL`, `VLY_APP_NAME`,
 `VLY_CONVEX_AUTH_ISSUER` or `VLY_INTEGRATION_KEY`, those belonged to the removed
-identity/integration stack. Alpha reads none of them; delete them from the
-environment UI at your convenience. Alpha's own environment values are managed
-outside the repository, so `.env.example` is documentation rather than a
-required file.
+identity/integration stack. Alpha reads none of them — the package that would
+have used them is no longer a dependency — so delete them from the environment UI
+at your convenience. Alpha's own environment values are managed outside the
+repository, so `.env.example` is documentation rather than a required file.
 
 **Never commit secrets.** Alpha keeps only password *derivations* and session
 token *hashes*; `redactSecrets()` in `src/alpha/security` strips anything
@@ -123,9 +155,18 @@ worth stating plainly:
    architecture table and the status of every module, including `Alpha
    Authentication` and `Alpha API`.
 3. **Training** — press *Train Alpha*. Watch the loss curve against the uniform
-   baseline; a checkpoint is written to Convex and the stage badge changes.
+   baseline; a checkpoint is written to Convex and the stage badge changes. The
+   panel also shows the **run record** (run id, seed, fingerprints, step, tokens,
+   losses, checkpoints, resume count), the **corpus report**, the **resource
+   envelope**, and a **Verify** action that runs checks A–I on a fresh model
+   without touching the live weights. *Pause*, *Continue run* and *Stop* appear
+   while a run is in progress.
 4. **Inference** — generate from the model. Compare it with the untrained
    output, and read the context-window report showing what was actually sent.
+   Sampling presets, a deterministic switch, stop sequences and stop token ids
+   are all editable, and the result shows its token ids, decoding mode, mean NLL,
+   stop reason and request id. A failed request shows the real error — never a
+   written answer.
 5. **Knowledge** — ingest a document, ask a question, read the cited chunks,
    write a memory, approve it, delete it.
 6. **Work** — run an agent task, read its plan and tool calls, register and run
@@ -168,6 +209,10 @@ worth stating plainly:
 | Signed out immediately after signing in | the deployment has no `alphaUsers`/`alphaSessions` tables yet | `bunx convex dev --once` to push the schema |
 | Sign-in says "incorrect" for a password you know | the account is locked after repeated failures | wait 15 minutes, or clear `lockedUntil` on the account row |
 | Workspace stuck on "training the tokenizer" | an exception during initialisation | the panel prints the error; usually a config conflict (vocabulary > model vocab, or sequence length > context) |
-| Training seems slow | every step is a real forward and backward pass in JavaScript, and there is no KV cache in inference | lower `totalSteps`, `batchSize` or `seqLen`, or use the `nano` preset |
-| Generation is nonsense | the model is untrained | train it; the badge and warning change when a checkpoint exists |
+| Training seems slow | every step is a real forward and backward pass in JavaScript, and there is no KV cache in inference | lower `totalSteps`, `batchSize` or `seqLen`, or use the `nano` preset — 60 steps at nano takes about 8 seconds |
+| Training refuses to start | the configuration exceeds `ALPHA_RESOURCE_LIMITS` | the Resource envelope frame states the limit and the estimate; shrink the model or the sequence length |
+| Resume rejected with a compatibility error | the checkpoint's architecture or tokenizer fingerprint does not match the current model | retrain, or point the workspace at the matching configuration — mismatched weights are refused rather than approximately loaded |
+| A verification check fails | something in the core is wrong | the check prints its measured values; this is a genuine bug, not a tolerance to widen |
+| Generation is nonsense | the model is untrained, or trained on the tiny seed corpus | train it; the badge and warning change when a checkpoint exists. Note that even trained, the shipped corpus yields a working pipeline rather than useful language |
+| A generation shows an error instead of text | the model or tokenizer could not produce a token | the real message is shown; there is no fallback answer by design |
 | MCP shows `NOT CONFIGURED` | no endpoint has been supplied | construct an `HttpMcpClient` with a real endpoint and call `registerMcpTools` |

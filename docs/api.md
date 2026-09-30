@@ -23,7 +23,12 @@ const workspace = new AlphaWorkspace({
 
 await workspace.initialise();   // trains the tokenizer, builds the model, wires modules
 
-for await (const event of workspace.train({ totalSteps: 60 })) { /* step | eval | checkpoint */ }
+for await (const event of workspace.train({ totalSteps: 60 })) { /* step | eval | checkpoint | job | done */ }
+workspace.pauseTraining();                              // requested between steps
+workspace.resumeTraining();                             // continue the same run
+workspace.stopTraining();
+workspace.verify();                                     // checks A–I on a fresh model
+workspace.corpusSummary();                              // corpus report
 workspace.generate("Alpha is", { maxNewTokens: 20 });   // GenerationResult
 await workspace.ingestDocument({ title, content, license });
 workspace.ask("what does Alpha store?");                // RagAnswer with citations
@@ -32,12 +37,18 @@ await workspace.runAgent("calculate 12 * 4", { maxSteps: 2 });
 await workspace.runWorkflow(workflowId, { run: true });
 workspace.approveTool("alpha.admin.clear_vector_store");
 workspace.resumeFrom(checkpoint);
+workspace.inferenceService;                             // AlphaInferenceService
 const snapshot = workspace.snapshot();                  // everything the UI renders
 ```
 
-`snapshot()` is the single read model: model record, tokenizer, corpus,
-training state, inference metrics, RAG documents and collections, memory,
-agents, tools, automation, security, observability and the module manifest.
+`snapshot()` is the single read model: model record and config fingerprint, the
+list of registered models, tokenizer, corpus report, training state (job, job
+summary, loss curve, pause/stop requests), verification report, resource
+estimates, inference metrics, RAG documents and collections, memory, agents,
+tools, automation, security, observability and the module manifest.
+
+`verify()` trains a **fresh** model instance, so it never disturbs the weights of
+the live workspace model.
 
 ---
 
@@ -161,6 +172,60 @@ trainer.evaluate({ maxBatches: 4 });        // { loss, perplexity, uniformLoss, 
 trainer.buildCheckpoint();                  // AlphaCheckpoint
 trainer.resumeFrom(checkpoint);
 trainer.trainToCompletion();                // TrainingSummary
+
+// checkpoint validation and compatibility
+parseCheckpoint(json)                        // re-validates; throws AlphaCheckpointError
+validateCheckpoint(checkpoint)               // { valid, issues }
+assertValidCheckpoint(checkpoint)
+assertCheckpointCompatible(checkpoint, model, tokenizer)
+summariseCheckpoint(checkpoint)              // omits weights/optimiser/rng/snapshot
+```
+
+### Training job records
+
+```ts
+import {
+  createTrainingJob, transitionJob, recordJobStep, recordJobEvaluation,
+  recordJobCheckpoint, failJob, jobProgress, summariseJob, validateTrainingJob,
+  canTransitionJob, trainingJobStateLabel,
+} from "@/alpha";
+
+let job = createTrainingJob({ model, tokenizer, dataset, config, seed: 1337 });
+job = transitionJob(job, "running");            // state graph is enforced
+job = recordJobStep(job, point);                 // step, loss, learning rate
+job = recordJobEvaluation(job, evaluation);      // validation loss
+job = recordJobCheckpoint(job, checkpointId);
+job = transitionJob(job, "completed");
+
+summariseJob(job);
+// "run_muo21cftgqm · RUNNING · step 34/60 · train 4.1021 · val 4.3187 · 1 checkpoint(s)"
+```
+
+### Verification
+
+```ts
+import { verifyAlphaModel, runAlphaTrainingLifecycle, formatLifecycleReport } from "@/alpha";
+
+const report = verifyAlphaModel({ model, tokenizer, dataset, training: { totalSteps: 40 } });
+report.passed;                                   // all nine checks
+report.checks;                                   // [{ id: "A".."I", label, passed, detail, data }]
+report.training;                                 // losses, uniform baseline, checkpoint, resume
+
+const lifecycle = runAlphaTrainingLifecycle({ preset: "nano" });
+console.log(formatLifecycleReport(lifecycle));   // the full measured pipeline
+```
+
+### Resource limits
+
+```ts
+import { ALPHA_RESOURCE_LIMITS, assertResourceLimit, estimateTrainingMemory, countParametersFromConfig } from "@/alpha";
+
+estimateTrainingMemory(config, { batchSize: 8, seqLen: 32 });
+// { parameterCount, weightsBytes, gradientBytes, optimizerBytes,
+//   activationBytes, totalBytes, note }
+
+assertResourceLimit("maxParameterCount", countParametersFromConfig(config));   // throws if too large
+ALPHA_RESOURCE_LIMITS.maxSeqLen;  // and maxContextLength, maxVocabSize, maxBatchSize, …
 ```
 
 ---
@@ -168,7 +233,32 @@ trainer.trainToCompletion();                // TrainingSummary
 ## Inference
 
 ```ts
-import { AlphaInferenceEngine, DEFAULT_SAMPLING, argmax } from "@/alpha";
+import { AlphaInferenceEngine, DEFAULT_SAMPLING, SAMPLING_PRESETS, argmax, resolveSampling } from "@/alpha";
+
+const engine = new AlphaInferenceEngine({ model, tokenizer, stage: "trained" });
+engine.generate("Alpha is", { temperature: 0.8, topK: 40, topP: 0.95, maxNewTokens: 24 });
+// { text, tokenIds, stopReason, modelStage, decoding, meanNll, sampling, warning, … }
+engine.generateStream(prompt, sampling);        // AsyncGenerator<chunk, GenerationResult>
+```
+
+### Inference service (model registry)
+
+```ts
+import { AlphaInferenceService } from "@/alpha";
+
+const service = new AlphaInferenceService();
+const id = AlphaInferenceService.modelId("alpha-nano", "0.1.0", fingerprint);
+service.registerModel({ id, model, tokenizer, stage: "trained", weights });
+service.defaultModel;                                     // the current default id
+service.listModels();                                    // AlphaModelDescriptor[]
+service.has(id);                                         // boolean
+service.resolve(id);                                     // throws on an unknown id
+service.generate({ modelId: id, prompt, generationConfig });
+service.generateStream({ modelId: id, prompt, generationConfig });
+service.scoreNextTokens({ modelId: id, prompt });         // per-token logprobs
+service.resolveSampling(modelId, config);                // the settings actually applied
+service.describe();                                      // { registered, defaultModelId, stages, models }
+service.unregisterModel(id) · service.clear();
 ```
 
 See [`docs/inference.md`](inference.md) for the sampling order, stop conditions
@@ -355,6 +445,37 @@ bunx convex run alphaAuth/maintenance:purgeEndedSessions '{"olderThanMs":0}'
 bunx convex run alphaAuth/maintenance:removeAccount '{"emailKey":"someone@example.com"}'
 ```
 
+## Model artifacts, training jobs and checkpoints (backend)
+
+```ts
+import { api } from "@/convex/_generated/api";
+
+await api.alpha.training.saveTokenizer({ sessionToken, ... });
+await api.alpha.training.currentTokenizer({ sessionToken });
+await api.alpha.training.saveDataset({ sessionToken, ... });
+await api.alpha.training.listDatasets({ sessionToken });
+
+// the full checkpoint document, weights and optimiser included
+await api.alpha.training.saveCheckpoint({ sessionToken, checkpoint });
+await api.alpha.training.listCheckpoints({ sessionToken, limit });
+await api.alpha.training.latestCheckpoint({ sessionToken });
+
+// run records
+await api.alpha.training.saveTrainingJob({ sessionToken, jobId, state, ... });
+await api.alpha.training.listTrainingJobs({ sessionToken, limit });
+await api.alpha.training.latestTrainingJob({ sessionToken });
+```
+
+A stored checkpoint keeps the whole payload — weights, Adam moments, RNG
+position, the tokenizer snapshot, dataset fingerprint and licence, and the run's
+training config. `parseCheckpoint(row.checkpoint)` on the client validates it
+before a single weight is loaded; if a row somehow has no payload stored, the
+workspace refuses to resume and says so rather than reconstructing a
+lookalike. The `alphaTrainingJobs` table is scoped to the account by
+`requireActorId`, like every other Alpha table.
+
+---
+
 ## Conversations
 
 ```ts
@@ -367,6 +488,14 @@ await api.alpha.conversations.appendMessage({
   sources,                 // [{ title, score, chunkId }]
   modelStage,              // which Alpha produced this turn
   tokens,
+  // provenance — written by the client hook from the actual result
+  modelId,                 // the registered model that answered
+  modelVersion,
+  generationConfig,        // the sampling config that was really applied
+  requestId,               // correlation id for this request
+  latencyMs,
+  stopReason,
+  error,                   // set instead of content when generation failed
 });
 await api.alpha.conversations.list({ sessionToken, limit });
 await api.alpha.conversations.get({ sessionToken, conversationId });
@@ -375,7 +504,12 @@ await api.alpha.conversations.remove({ sessionToken, conversationId });
 ```
 
 Each assistant turn records the `modelStage` that produced it, so a stored
-transcript cannot later be read as though a finished model wrote it.
+transcript cannot later be read as though a finished model wrote it. The
+provenance fields — `modelId`, `modelVersion`, `generationConfig`,
+`requestId`, `latencyMs`, `stopReason` and `error` — make a stored turn
+self-describing: which weights answered, under which settings, how long it took,
+why it stopped, and whether it failed at all. A failed generation is stored with
+its error and no answer; there is no fallback text anywhere in the path.
 
 See [`docs/authentication.md`](authentication.md) for the security model behind
 these calls, and [`docs/setup.md`](setup.md) for environment variables.

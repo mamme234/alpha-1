@@ -24,12 +24,12 @@ Inside the AI stack:
 | Module | Path | Status | Meaning of that status |
 | --- | --- | --- | --- |
 | Core | `src/alpha/core` | **READY** | Complete; gradients verified numerically in tests |
-| Model | `src/alpha/model` | **READY** | Architecture complete; weights are untrained until a run completes |
+| Model | `src/alpha/model` | **READY** | Architecture complete and exercised by a real run; a deployment's weights are untrained until a run completes there |
 | Tokenizer | `src/alpha/tokenizer` | **READY** | Trains from a corpus in one call; versioned and serialisable |
 | Context | `src/alpha/context` | **READY** | Budget measured on the exact prompt; every block reported as included, truncated or dropped |
-| Datasets | `src/alpha/datasets` | **READY** | Corpus type, splitting, tokenisation, batching |
-| Training | `src/alpha/training` | **READY** | Real backprop, AdamW, checkpoints, resumable |
-| Inference | `src/alpha/inference` | **IN DEVELOPMENT** | Sampling and streaming work; no KV cache or batched decoding yet |
+| Datasets | `src/alpha/datasets` | **READY** | Corpus type, splitting, tokenisation, batching, corpus report |
+| Training | `src/alpha/training` | **READY** | Real backprop, AdamW, job records, validated checkpoints, resume, checks A–I |
+| Inference | `src/alpha/inference` | **IN DEVELOPMENT** | Sampling, presets, stop conditions and a model registry all work and are verified on a trained model; no KV cache or batched decoding yet |
 | Embeddings | `src/alpha/embeddings` | **IN DEVELOPMENT** | Pooled hidden states work; no contrastive objective yet |
 | Vector store | `src/alpha/vector` | **READY** | Exact search, metadata, persistence, deterministic ties |
 | RAG | `src/alpha/rag` | **READY** | Full pipeline; text and markdown only (others fail loudly) |
@@ -127,6 +127,10 @@ Nothing in the tree imports the application layer. `src/alpha` has no Convex,
 React or Vite dependency, which is why the same object runs in a browser tab,
 in a Node script and in tests. Persistence is injected as an optional adapter.
 
+The workspace also owns an `AlphaInferenceService` (a registry of the models it
+can generate from) and a training job record, so a prompt always names the
+weights that produced it and a run always carries its own provenance.
+
 ---
 
 ## Data flows
@@ -141,8 +145,15 @@ dataset documents
   → crossEntropy (fused softmax + NLL, padding-aware)
   → backward (topological reverse pass over the recorded graph)
   → AdamW with global-norm clipping and a warmup/decay schedule
-  → metrics → checkpoint (weights, optimiser moments, RNG position, metrics)
+  → metrics → AlphaTrainingJob record (state, seed, step, losses, checkpoints)
+  → checkpoint (weights, optimiser moments, RNG position, tokenizer snapshot, metrics)
+  → reload (fingerprints checked, weights restored, max abs difference 0)
+  → resume (same run, same config, same schedule) → inference
 ```
+
+This whole path has been executed in this repository — see
+[`docs/training.md`](training.md#measured-run) for the run and the checks A–I
+that verify each link.
 
 ### Retrieval and answering
 
@@ -224,18 +235,30 @@ Three properties make the report trustworthy:
 
 ---
 
-### `training` — the trainer
+### `training` — the trainer, the job record and verification
 
 ```ts
 const trainer = new AlphaTrainer({ model, tokenizer, dataset, config })
 for (const event of trainer.run()) { /* step | eval | checkpoint | done */ }
 trainer.evaluate({ maxBatches })      // deterministic validation pass
-trainer.buildCheckpoint()             // artifact with weights + optimiser + RNG
+trainer.buildCheckpoint()             // weights + optimiser + RNG + tokenizer snapshot
 trainer.resumeFrom(checkpoint)        // continues rather than restarts
+
+// the run record
+createTrainingJob(input) · transitionJob(job, state, reason) · recordJobStep(job, point)
+recordJobEvaluation(job, evaluation) · recordJobCheckpoint(job, checkpointId)
+failJob(job, message) · jobProgress(job) · summariseJob(job) · validateTrainingJob(job)
+
+// verification — nine measured checks, A through I
+verifyAlphaModel({ model, tokenizer, dataset, training }) → VerificationReport
+runAlphaTrainingLifecycle({ preset, dataset, training, resumeSteps, runVerification }) → AlphaLifecycleReport
+formatLifecycleReport(report) → string
 ```
 
 `run()` is a generator so a browser can train in slices without freezing the
 tab; `trainToCompletion()` is the synchronous convenience for scripts and tests.
+`verifyAlphaModel` trains a fresh model instance, so running it never disturbs
+live weights.
 
 ### `inference` — generation
 
@@ -243,10 +266,18 @@ tab; `trainToCompletion()` is the synchronous convenience for scripts and tests.
 const engine = new AlphaInferenceEngine({ model, tokenizer, stage })
 engine.generate(prompt, sampling) → GenerationResult   // text + provenance
 engine.generateStream(prompt, sampling) → AsyncGenerator<chunk, GenerationResult>
+
+const service = new AlphaInferenceService();
+service.register({ id, model, tokenizer, stage, weights });
+service.generate({ modelId, prompt, generationConfig });   // throws on an unknown id
+service.scoreNextTokens({ modelId, prompt });
+service.listModels();
 ```
 
-Every `GenerationResult` carries `modelStage` and a `warning` while the weights
-are untrained; there is no code path that omits it.
+Every `GenerationResult` carries `modelStage`, `decoding`, `stopReason`,
+`tokenIds`, `meanNll`, the sampling config actually applied, and a `warning`
+while the weights are untrained; there is no code path that omits them, and no
+fallback model to resolve to when an id is unknown.
 
 ### `embeddings`, `vector`, `rag`, `memory`
 
@@ -359,6 +390,9 @@ Every table is scoped to the signed-in user by
 
 Listed here so the architecture document is not a sales page:
 
+- **Language quality.** The lifecycle is verified; the model is small. A real
+  run in this repository produced 128,768 parameters and 24 newline tokens. The
+  path works; the output is not useful language, and every result says so.
 - **Inference:** no KV cache and no batched decoding; generation re-runs the
   prefix each token. Cost is O(T²) per token and is stated in the UI.
 - **Embeddings:** no contrastive training objective yet, so embedding quality
@@ -370,3 +404,20 @@ Listed here so the architecture document is not a sales page:
 - **Model scale:** the presets are deliberately small enough to train in a tab.
   Scaling up is a configuration change, not a code change — and it will need
   proportionally more data and compute.
+
+---
+
+## What was actually run
+
+The lifecycle claim in this document is not aspirational. `bun run alpha:train`
+(60 steps, `nano`, seed 1337) and `bun run alpha:verify --steps 40` both complete
+in this repository, and the numbers are recorded in
+[`docs/training.md`](training.md#measured-run): loss 5.9428 → 3.9579 against a
+uniform baseline of 5.9506, a validated checkpoint of 515,072 bytes of weights,
+a reload whose maximum absolute weight difference was exactly 0, a resume from
+step 60 to 62, deterministic greedy generation, and 9 of 9 verification checks
+passing.
+
+The workspace you open is still `untrained` until you train it there. That
+distinction is the point: the codebase can produce a model, and it does not
+pretend to ship one.

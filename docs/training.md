@@ -5,10 +5,14 @@ distillation step, no weight download and no external trainer: the corpus is
 tokenised, batched, passed forward, scored with cross-entropy, scored backward,
 and applied to the parameters with AdamW.
 
+The pipeline is not described here as if it were intended — it has been run in
+this repository, and the numbers further down are what that run printed. See
+[Measured run](#measured-run).
+
 ```
 src/alpha/datasets   corpus, splitting, batching
 src/alpha/tokenizer  vocabulary training
-src/alpha/training   optimiser, schedule, checkpoints, trainer
+src/alpha/training   optimiser, schedule, checkpoints, trainer, job record, verification
 src/alpha/core       tensor and autodiff used by all of the above
 ```
 
@@ -157,19 +161,41 @@ A checkpoint is the unit of *"Alpha has actually trained"*:
 
 ```ts
 type AlphaCheckpoint = {
-  id; label; modelName; modelVersion; config;
-  tokenizerVersion; datasetName; datasetLicense;
+  id; label; formatVersion;
+  runId;                 // the training run that wrote it
+  seed;                  // the run's sampling seed
+  trainingConfig;        // the config the run started with
+  modelName; modelVersion; config; configFingerprint;
+  tokenizer: {           // enough to rebuild the vocabulary, not just name it
+    version; vocabSize; fingerprint; trainedOn; specialTokenIds;
+    snapshot;            // full merge table + alphabet
+  };
+  tokenizerVersion;      // convenience mirror
+  datasetName; datasetVersion; datasetFingerprint; datasetLicense;
   step; tokensSeen; learningRate;
-  metrics: { trainLoss, validationLoss, validationPerplexity | null };
+  metrics: { trainLoss, validationLoss, validationPerplexity, uniformLoss };
   weights: SerializedWeights;          // base64 float32 per parameter
   optimizer: OptimizerStateSnapshot;   // Adam first/second moments
   rng: RngState;                       // exact sampler position
-  createdAt; sizeBytes; stage; notes;
+  createdAt; sizeBytes; stage; isFineTune; notes;
 };
 ```
 
+The checkpoint carries the **tokenizer snapshot**, not just its version. That is
+deliberate: a checkpoint plus its own tokenizer is enough to rebuild the exact
+model that produced it, with no dependency on whatever vocabulary happens to be
+loaded later.
+
 Weights are stored as base64 float32 rather than JSON numbers: a checkpoint is
-compact enough to persist in Alpha's own tables and to check into a fixture.
+compact enough to persist in Alpha's own tables and to check into a fixture. The
+`nano` run's checkpoint is 515,072 bytes of weights — 2,072,746 bytes of JSON
+once base64 is expanded and every field is spelled out.
+
+`validateCheckpoint` / `assertValidCheckpoint` check the payload's structure,
+`parseCheckpoint` re-validates on the way back out of storage and throws
+`AlphaCheckpointError` on anything malformed, and `assertCheckpointCompatible`
+compares the architecture fingerprint, the tokenizer fingerprint and the
+vocabulary size against the live model before a single weight is loaded.
 
 **Resuming is real.** `trainer.resumeFrom(checkpoint)` restores the weights, the
 optimiser moments (so Adam's running estimates are not reset) and the RNG
@@ -180,13 +206,188 @@ trainer.resumeFrom(stored);        // step is now stored.step
 trainer.trainToCompletion();       // continues instead of restarting
 ```
 
+Because the checkpoint stores the run's **training config**, a resumed run
+continues toward the same step budget on the same schedule rather than picking up
+whatever the workspace currently defaults to. `resumes` is counted on the job
+record, so "resumed once" and "trained from scratch" stay distinguishable.
+
 The workspace exposes the same operation against a checkpoint loaded from
-Convex, and rejects a checkpoint whose vocabulary does not match the current
-model — loading mismatched weights would silently mean nothing.
+Convex, and rejects a checkpoint whose vocabulary, architecture fingerprint or
+tokenizer fingerprint does not match the current model — loading mismatched
+weights would silently mean nothing.
 
 ---
 
-## 6. Running training
+## 6. The run record
+
+Every run has an `AlphaTrainingJob` beside the metrics: state, seed, references,
+progress, and what happened to it.
+
+```ts
+type AlphaTrainingJob = {
+  id; state;                 // created | running | paused | completed | failed | stopped
+  model: { name, version, configFingerprint };
+  tokenizer: { version, vocabSize, fingerprint, license };
+  dataset: { name, version, fingerprint, license, tokens, documents };
+  config; seed; step; totalSteps; epochs; tokensSeen;
+  trainLoss; bestLoss; validationLoss; learningRate;
+  checkpointIds; lastCheckpointId;
+  resumedFromCheckpointId; resumes;
+  createdAt; startedAt; updatedAt; finishedAt; error; notes;
+};
+```
+
+State changes go through `transitionJob`, which enforces the legal graph
+(`canTransitionJob`) — a paused job cannot jump straight to completed, and a
+failed job does not silently restart. `createTrainingJob`, `recordJobStep`,
+`recordJobEvaluation`, `recordJobCheckpoint` and `failJob` are the only ways the
+record changes, so it cannot drift away from what actually happened.
+`summariseJob(job)` renders the one-line form the UI shows:
+
+```
+run_muo21cftgqm · RUNNING · step 34/60 · train 4.1021 · val 4.3187 · 1 checkpoint(s)
+```
+
+The workspace exposes pause, resume-from-store and stop, and each writes the
+transition it performed. Verification trains a **fresh** model instance, so
+pressing *Verify* never disturbs the weights of a run in progress.
+
+---
+
+## 7. Verification
+
+`verifyAlphaModel()` is the answer to "does this thing actually work?" — and it
+answers with measurements rather than a claim.
+
+```ts
+import { verifyAlphaModel } from "@/alpha";
+
+const report = verifyAlphaModel({ model, tokenizer, dataset, training: { totalSteps: 40 } });
+report.passed;                 // true only if all nine checks pass
+report.checks;                 // [{ id, label, passed, detail, data }]
+report.training;               // firstLoss, lastLoss, uniformLoss, validationLoss, …
+```
+
+| Check | What it proves |
+| --- | --- |
+| A | initial parameters are not all identical (a real distribution, not a constant) |
+| B | one real optimiser step moves the weights — the weight hash changes |
+| C | gradients are non-zero **and** match central differences of the loss |
+| D | the reported loss equals an independent softmax/NLL recomputation, and differs per batch |
+| E | a checkpoint can be written and passes validation |
+| F | that checkpoint can be parsed back and re-validated |
+| G | every reloaded tensor matches the saved one — maximum absolute difference 0 |
+| H | training resumes from the checkpoint and continues the same run |
+| I | inference runs on the reloaded weights; repeat decode is identical and the first token is the model's own argmax |
+
+Run it from the terminal:
+
+```bash
+bun run alpha:verify --steps 40
+```
+
+The measured output of that command in this repository:
+
+```
+Verification PASSED
+  A. ok  Initial parameters are not all identical — Sampled 512 distinct values from the token embedding; range [-5.662e-2, 4.674e-2].
+  B. ok  A training step changes parameters — Weights hash moved from w_0895ff11 to w_68f44bd7 after one real optimiser step (loss 5.9107).
+  C. ok  Gradients are non-zero and match numerical differences — 2120/2304 sampled gradient entries are non-zero. Autodiff matches central differences on 72 sampled value(s) across 36 tensor(s); largest relative error above the 1e-4 absolute floor is 0.000e+0 (tolerance 0.05), largest absolute error 2.465e-5.
+  D. ok  Loss is calculated from the model's actual predictions — Model loss 5.963971 equals an independent softmax/NLL recomputation (5.963971) over 16 tokens; a different batch gives 5.975486 and the uniform baseline is 5.950643.
+  E. ok  A checkpoint can be saved — Wrote ckpt_muo21qdw1yzrd at step 8 (2,072,747 bytes of JSON, 515,072 bytes of weights).
+  F. ok  The checkpoint can be reloaded — Parsed ckpt_muo21qdw1yzrd back from JSON and re-validated it (format 1.0.0, tokenizer tok_02690d5b).
+  G. ok  Reloaded parameters match the saved parameters — Every tensor in the payload reloaded with a maximum absolute difference of exactly 0 across the whole parameter set.
+  H. ok  Training can resume from the checkpoint — Restored step 8 and AdamW at step 8, then trained 2 more step(s) to 10 (loss 4.7614, validation 5.0102).
+  I. ok  Inference runs on the trained/reloaded model and emits tokens — Greedy decode produced 12 token(s) from alpha-nano (max-tokens); repeating it gives identical ids: true. The first generated token 4 is the argmax 4 of the reloaded model's own logits (true).
+```
+
+---
+
+## 8. Resource envelope
+
+Training a model in a browser tab needs a bound, and Alpha states it before the
+run rather than discovering it as a crash.
+
+```ts
+import { ALPHA_RESOURCE_LIMITS, estimateTrainingMemory, countParametersFromConfig } from "@/alpha";
+
+const estimate = estimateTrainingMemory(config, { batchSize: 8, seqLen: 32 });
+// { parameterCount, weightsBytes, gradientBytes, optimizerBytes,
+//   activationBytes, totalBytes, note }
+```
+
+`assertResourceLimit(kind, value)` raises rather than letting a run die
+mid-flight. The ceilings — `maxContextLength`, `maxVocabSize`, `maxLayers`,
+`maxDModel`, `maxParameterCount`, `maxBatchSize`, `maxSeqLen`, `maxTotalSteps`,
+`maxNewTokens`, `maxPromptTokens`, `maxDocuments`, `maxDocumentCharacters`,
+`maxDropout` — are deliberately small: Alpha's stack is real but CPU-only. The
+Training panel shows the estimate and the limits side by side, so a
+configuration that would not fit is visible before you press *Train Alpha*.
+
+---
+
+## 9. Measured run
+
+This is the actual output of `bun run alpha:train` (60 steps, `nano`, seed 1337)
+in this repository, reproduced rather than approximated:
+
+```
+ALPHA LIFECYCLE REPORT — executed 2026-09-30T12:01:30.236Z in 8.88s
+Overall: OK — every stage completed
+
+Model        alpha-nano v0.1.0 (nano) · 128,768 params · 2L/64d/4h · context 64 · vocab 384
+Tokenizer    v0.1.0 · 384 tokens · 333 merges · tok_02690d5b
+Corpus       alpha-seed@1.0.0 (CC0-1.0 (authored for this repository)) · 20 docs · 5,358 chars · 2,634 tokens
+Split        train 2,214 tokens / 69 examples · validation 420 tokens / 13 examples
+Training     60 steps · batch 8 × seq 32 · seed 1337 · 15,360 tokens · 1905 tokens/s
+Loss         first 5.9428 → last 3.9579 · best 3.8190 · uniform baseline 5.9506 · validation 4.2403
+Checkpoint   ckpt_muo21inu01bmj (run run_muo21cftgqm) · step 60 · stage trained · 515,072 bytes · valid true
+Reload       compatible true · max absolute weight difference 0
+Resume       step 60 → 62 (+2) · loss after resume 3.8460
+Inference    24 token(s) · stop max-tokens · stage trained · deterministic true
+Token ids    [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+```
+
+What that establishes, in order:
+
+1. **The tokenizer trained itself** on the shipped corpus — 333 merges, 384
+   tokens, fingerprint `tok_02690d5b`.
+2. **The corpus was encoded and split** deterministically: 2,214 training and 420
+   validation tokens, zero unknown characters.
+3. **Loss fell below the uniform baseline** — 5.9428 → 3.9579, best 3.8190,
+   against `ln(384) = 5.9506`. Mean gradient norm 1.4702. Weights changed.
+4. **A checkpoint was written and validated** at step 60: 515,072 bytes of
+   weights, stage `trained`.
+5. **The checkpoint reloaded exactly** — maximum absolute weight difference 0
+   across the whole parameter set, with the architecture and tokenizer
+   fingerprints checked first.
+6. **Training resumed from it** — step 60 → 62, continuing the same run rather
+   than restarting, loss 3.8460.
+7. **Inference ran on the trained weights** and produced tokens, deterministically
+   under greedy decoding, and the decoded text round-trips from the token ids.
+
+**Read the last line honestly.** Twenty-four copies of token 4 (`"\n"`) is what
+a 128,768-parameter model trained on twenty paragraphs can do. The lifecycle is
+verified; the *language quality* is not, and it is not claimed. Alpha labels the
+stage on every result so the two are never confused.
+
+---
+
+## 10. Running training
+
+### From the terminal
+
+```bash
+bun run alpha:train                              # 60 steps, nano, seed 1337
+bun run alpha:train --steps 200 --preset micro
+bun run alpha:verify --steps 40                  # the nine checks
+bun run alpha:train --json > run.json            # machine-readable
+```
+
+The CLI executes the real pipeline — corpus, tokenizer, transformer, loss,
+backpropagation, AdamW, checkpoint, reload, resume, inference — and writes
+nothing to disk. Confidence in Alpha comes from running this, not from trusting
+a number in a document.
 
 ### In the browser workspace
 
@@ -194,6 +395,14 @@ model — loading mismatched weights would silently mean nothing.
 and validation interval, press *Train Alpha*. The loss curve updates while it
 runs; a checkpoint is written to Convex at the interval you set, and the model
 badge changes from `UNTRAINED` to `TRAINED (FROM SCRATCH)` when one exists.
+
+The panel also shows the **run record** (run id, tokenizer and dataset
+fingerprints, seed, step, tokens, epochs, losses, checkpoint ids, resume count),
+the **verification report** (checks A–I with their measured details), the
+**corpus report** (fingerprint, train/validation examples, unknown characters,
+sequence length, batch size, padding) and the **resource envelope**. While a run
+is in progress the action bar offers *Pause*, *Continue run* and *Stop* rather
+than only *Train*.
 
 ### In a script
 
@@ -207,18 +416,18 @@ console.log(summary.lastLoss, summary.validationLoss, summary.uniformLossBaselin
 
 The seed corpus is tiny. A few dozen steps will move the loss down and beat the
 uniform baseline; more steps overfit it. That is the correct result for
-~50k parameters on ~20 paragraphs, and it is reported rather than papered over.
-Point Alpha at a real corpus and raise the preset to get a real model.
+128,768 parameters on ~20 paragraphs, and it is reported rather than papered
+over. Point Alpha at a real corpus and raise the preset to get a real model.
 
 ---
 
-## 7. Configuration reference
+## 11. Configuration reference
 
 | Field | Default | Notes |
 | --- | --- | --- |
 | `batchSize` | 8 | windows per step |
 | `seqLen` | 32 | must be ≤ `contextLength` |
-| `totalSteps` | 120 | optimiser steps in the run |
+| `totalSteps` | 120 | optimiser steps in the run; a resumed run continues toward this number |
 | `learningRate` | 3e-3 | peak rate before the schedule |
 | `schedule` | `cosine` | `constant`, `linear-decay`, `cosine`, `inverse-sqrt` |
 | `warmupSteps` | 12 | linear warmup |

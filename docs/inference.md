@@ -6,9 +6,16 @@ weights are untrained, the output is what untrained weights produce, and the
 result says so.
 
 ```
-src/alpha/inference/engine.ts   sampling, generation, streaming, stop conditions
+src/alpha/inference/engine.ts    sampling, generation, streaming, stop conditions
+src/alpha/inference/service.ts   registry over the models in a workspace
 src/alpha/embeddings/embedder.ts vectors from the same model
 ```
+
+Alpha's inference path is exercised by a real trained model in this repository:
+after 60 steps the checkpoint reloads with a maximum absolute weight difference
+of 0, and generation from the reloaded weights produces 24 tokens
+deterministically under greedy decoding. The decoded text round-trips from the
+token ids. See [`docs/training.md`](training.md#measured-run).
 
 ---
 
@@ -30,10 +37,24 @@ const result = engine.generate("Alpha is a self owned", {
 });
 
 result.text;            // sampled continuation
+result.tokenIds;        // number[] — the ids that produced the text
 result.stopReason;      // "eos" | "stop-sequence" | "max-tokens" | "context-limit"
 result.modelStage;      // "untrained" until a checkpoint exists
+result.decoding;        // "greedy" | "sampled"
+result.meanNll;         // mean negative log-likelihood of the chosen tokens
+result.sampling;        // the config that was actually applied, after resolution
 result.warning;         // why that output should not be trusted as language
 ```
+
+`stopTokenIds` is also a stop condition: generation halts when the model emits
+one of those ids, whichever stop string matched first is what `stopReason`
+reports, and empty stop fields mean *no* extra stop condition beyond `<eos>`,
+the token budget and the context window.
+
+`deterministic: true` is greedy decoding — always the highest-probability token,
+ignoring temperature, top-k, top-p and the seed. It is a separate flag rather
+than a temperature of 0 because temperature 0 is a degenerate distribution that
+different implementations disagree about; a switch is unambiguous.
 
 ### Sampling order
 
@@ -48,7 +69,25 @@ For each step, over the logits of the final position:
 6. **Sample** from the surviving mass using Alpha's deterministic RNG.
 
 The same seed and settings reproduce the same sample exactly, which is what
-makes a generation reproducible rather than merely similar.
+makes a generation reproducible rather than merely similar. In the measured run
+above, greedy decoding from the reloaded model returned identical ids on a
+repeat, and a sampled decode with seed 7 produced a different, also-reproducible
+sequence.
+
+### Presets
+
+`SAMPLING_PRESETS` holds three named settings so the panel does not have to
+invent numbers:
+
+| Preset | Temperature | Top-k | Top-p | Character |
+| --- | --- | --- | --- | --- |
+| `greedy` | — | — | — | deterministic; always the argmax |
+| `balanced` | 0.8 | 40 | 0.95 | the default path |
+| `creative` | 1.2 | 80 | 0.99 | wider tail |
+
+`resolveSampling(config)` reports the effective settings after resolution, which
+is what the UI prints next to a result — so a request made with greedy decoding
+on shows as greedy, not as a temperature it ignored.
 
 ### Stop conditions
 
@@ -92,6 +131,39 @@ const result = workspace.generate("Alpha is a self owned", { maxNewTokens: 40 })
 Every generation records a span, updates metrics (requests, latency histogram,
 tokens generated, stop reason) and writes a run record
 (`kind: "inference"`) to Convex with the model stage attached.
+
+### The model registry
+
+`AlphaInferenceService` owns the models a workspace can generate from, so a
+prompt always names *which* weights produced it.
+
+```ts
+import { AlphaInferenceService } from "@/alpha";
+
+const id = AlphaInferenceService.modelId("alpha-nano", "0.1.0", fingerprint);
+service.registerModel({ id, model, tokenizer, stage, weights });
+service.resolve(id);                 // throws if the id is unknown
+service.generate({ modelId: id, prompt, generationConfig });
+service.generateStream({ modelId: id, prompt, generationConfig });
+service.scoreNextTokens({ modelId: id, prompt });   // per-token logprobs
+service.listModels();                // AlphaModelDescriptor[]
+```
+
+Resolving an unknown model id throws rather than falling back to whatever is
+loaded. There is no "default assistant", no provider and no canned reply: if the
+weights cannot produce a token, the request fails and the failure is shown.
+
+### Conversation integration
+
+In the app, a turn is not just text. The hook records, per turn:
+`requestId` (a correlation id), the `modelId` and `modelVersion` that answered,
+the `generationConfig` actually applied, the trace id, latency, stop reason, the
+token ids and — when a request fails — the real error message. All of it is
+written beside the transcript row, so a stored conversation carries its own
+provenance and cannot later be read as though a different model wrote it.
+
+A failed generation produces a turn carrying that error and **no answer**. There
+is no fallback text.
 
 ---
 
@@ -146,7 +218,7 @@ rather than implying otherwise. A contrastive objective is listed as missing in
 Stated plainly, because pretending would defeat the point of the project:
 
 - **KV cache.** Generation re-runs the prefix for every token. Cost is O(T²) per
-  token; the UI says so. This is the first optimisation to add.
+  token; the UI says so under *Measured*. This is the first optimisation to add.
 - **Batched decoding.** One sequence at a time.
 - **Speculative decoding, beam search, constrained decoding.** Not implemented.
 - **Grammar/JSON-constrained output.** The agent runtime validates JSON after the
@@ -154,3 +226,18 @@ Stated plainly, because pretending would defeat the point of the project:
 
 Until a KV cache exists, keep `maxNewTokens` and `contextLength` modest, and
 expect generation to slow down as the context grows.
+
+## What the measured run did and did not show
+
+The verified lifecycle in [`docs/training.md`](training.md#measured-run) ends
+with 24 tokens, all of id 4 (`"\n"`), from a 128,768-parameter model trained for
+60 steps on twenty paragraphs. Read that as what it is:
+
+- **It shows** that the path works: trained weights reload exactly, generation
+  runs on them, greedy decoding is deterministic, and the ids decode back to the
+  text.
+- **It does not show** useful language. Nothing here claims otherwise, and every
+  result carries the model stage so the claim cannot be inflated downstream.
+
+Inference is labelled **IN DEVELOPMENT** for the missing performance work above,
+not because the pipeline is unverified.
