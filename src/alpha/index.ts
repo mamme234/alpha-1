@@ -507,6 +507,108 @@ export {
   type AlphaConfigOverrides,
 } from "./configs/alpha.config";
 
+// --- step 4: dataset versioning + quality ---------------------------------
+export {
+  ALPHA_TRAINABLE_LICENSES,
+  DEFAULT_FILTERS,
+  DEFAULT_NORMALISATION,
+  assertTrainableDatasetVersion,
+  buildSplits,
+  createDatasetVersion,
+  describeDatasetVersion,
+  hasInvalidUnicode,
+  normaliseDocument,
+  repetitionRatio,
+  splitDataset,
+  toDataset,
+  type AlphaDatasetVersion,
+  type CreateDatasetVersionInput,
+  type DatasetSource,
+  type DatasetSplit,
+  type DatasetVersionManifest,
+  type FilterDecision,
+  type FilterSettings,
+  type NormalisationSettings,
+} from "./datasets/versions";
+export {
+  analyseDatasetQuality,
+  analyseDatasetVersionQuality,
+  summariseQualityReport,
+  type QualityFinding,
+  type QualityOptions,
+  type QualityReport,
+  type QualitySeverity,
+} from "./datasets/quality";
+export {
+  buildGeneratedCorpus,
+  generatedCorpusSize,
+  generatedCorpusTopics,
+} from "./datasets/generated-corpus";
+
+// --- step 4: evaluation ----------------------------------------------------
+export {
+  ALPHA_BENCHMARK_VERSION,
+  assertNotBenchmark,
+  benchmarkIdentity,
+  createAlphaBenchmark,
+  heldOutCases,
+  recallCases,
+} from "./evaluation/benchmark";
+export {
+  evaluateModel,
+  metricValue,
+  passedChecks,
+  summariseEvaluation,
+  type CapabilityResult,
+  type EvaluationMetric,
+  type EvaluationOptions,
+  type EvaluationReport,
+} from "./evaluation/framework";
+
+// --- step 4: training scaling ----------------------------------------------
+export {
+  RUNTIME_CAPABILITIES,
+  TRAINING_LIFECYCLE_STATES,
+  TRAINING_LIFECYCLE_TRANSITIONS,
+  assertTrainableWithinLimits,
+  canTransitionLifecycle,
+  describeRun,
+  estimateResources,
+  lifecycleFromJobState,
+  terminalLifecycle,
+  tokenMetricsFromSummary,
+  type ResourceEstimate,
+  type TokenMetrics,
+  type TrainingLifecycleState,
+} from "./training/scaling";
+
+// --- step 4: model registry + export ---------------------------------------
+export {
+  AlphaModelRegistry,
+  MODEL_LIFECYCLE_ORDER,
+  MODEL_LIFECYCLE_TRANSITIONS,
+  modelIdFor,
+  newModelId,
+  type CompatibilityCheck,
+  type CompatibilityReport,
+  type ModelLifecycle,
+  type ModelPromotion,
+  type ModelRelationships,
+  type RegisteredModel,
+  type RegisterModelRequest,
+} from "./model/registry";
+export {
+  ALPHA_MODEL_EXPORT_VERSION,
+  exportId,
+  exportModel,
+  importModel,
+  parseModelExport,
+  serialiseModelExport,
+  type AlphaModelExport,
+  type ExportModelInput,
+  type ImportResult,
+} from "./model/export";
+
 // --- manifest + workspace ---------------------------------------------------
 export { ALPHA_MODULES, moduleById, moduleStatusCounts } from "./modules";
 export {

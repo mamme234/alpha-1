@@ -84,8 +84,8 @@ length ≤ context length, retrieval chunk size ≤ context length.
 | Preset | Layers | Width | Heads | Feed-forward | Context | Parameters (before the vocabulary is fixed) |
 | --- | --- | --- | --- | --- | --- | --- |
 | `nano` | 2 | 64 | 4 | 256 | 64 | 128,768 measured at vocab 384 |
-| `micro` | 3 | 96 | 6 | 384 | 96 | ~190k at vocab 768 |
-| `small` | 4 | 128 | 8 | 512 | 128 | ~700k at vocab 2048 |
+| `micro` | 3 | 96 | 6 | 384 | 96 | 418,656 computed at vocab 768 |
+| `small` | 4 | 128 | 8 | 512 | 128 | 1,071,872 computed at vocab 2048 |
 
 The `nano` figure is not an estimate: it is the parameter count of a real
 `AlphaTransformer` instantiated by a run in this repository, and
