@@ -92,6 +92,21 @@ export class AlphaUntrainedModelError extends AlphaError {
   }
 }
 
+/**
+ * Raised when a checkpoint is corrupt, incomplete or was produced by a
+ * different architecture. Alpha refuses to load it rather than running with
+ * silently mismatched weights.
+ */
+export class AlphaCheckpointError extends AlphaError {
+  readonly issues: string[];
+
+  constructor(message: string, issues: string[] = [], details: Record<string, unknown> = {}) {
+    super("alpha.checkpoint_invalid", "training", message, { ...details, issues });
+    this.name = "AlphaCheckpointError";
+    this.issues = issues;
+  }
+}
+
 /** Raised when a tool or MCP endpoint fails during execution. */
 export class AlphaToolError extends AlphaError {
   constructor(message: string, details: Record<string, unknown> = {}) {

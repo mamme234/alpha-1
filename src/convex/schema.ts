@@ -121,6 +121,17 @@ const schema = defineSchema(
       modelStage: v.optional(v.string()),
       tokens: v.optional(v.number()),
       traceId: v.optional(v.string()),
+      /** Which model and vocabulary produced an assistant turn. */
+      modelId: v.optional(v.string()),
+      modelVersion: v.optional(v.string()),
+      /** The sampling configuration actually used for this turn. */
+      generationConfig: v.optional(v.any()),
+      /** Request id (trace id) for the inference call, when one was made. */
+      requestId: v.optional(v.string()),
+      latencyMs: v.optional(v.number()),
+      stopReason: v.optional(v.string()),
+      /** Set when inference failed: the actual error, stored rather than hidden. */
+      error: v.optional(v.string()),
       createdAt: v.number(),
     })
       .index("by_conversation", ["actorId", "conversationId"])
@@ -181,10 +192,22 @@ const schema = defineSchema(
       optimizer: v.string(),
       rng: v.any(),
       config: v.any(),
+      /** Run metadata, so a checkpoint can be traced back to its training run. */
+      runId: v.optional(v.string()),
+      seed: v.optional(v.number()),
+      datasetVersion: v.optional(v.string()),
+      tokenizerFingerprint: v.optional(v.string()),
+      formatVersion: v.optional(v.string()),
+      /**
+       * The complete checkpoint document. Stored so a resume restores the
+       * exact artefact rather than reassembling a lookalike from columns.
+       */
+      checkpoint: v.optional(v.string()),
       createdAt: v.number(),
     })
       .index("by_actor", ["actorId"])
-      .index("by_checkpoint", ["checkpointId"]),
+      .index("by_checkpoint", ["checkpointId"])
+      .index("by_run", ["runId"]),
 
     /** Datasets available to Alpha (seed corpus plus anything the user adds). */
     alphaDatasets: defineTable({
@@ -345,6 +368,53 @@ const schema = defineSchema(
     })
       .index("by_actor", ["actorId"])
       .index("by_workflow", ["workflowId"]),
+
+    /**
+     * Alpha training runs.
+     *
+     * A run is a record, not a log line: it carries the id, the lifecycle
+     * state, the recipe it was started with (model, tokenizer, dataset, config
+     * snapshot, seed) and the metrics and checkpoints it produced. A resumed
+     * run points at the checkpoint it continued from.
+     */
+    alphaTrainingJobs: defineTable({
+      actorId: v.string(),
+      jobId: v.string(),
+      /** created | running | paused | completed | failed | stopped */
+      state: v.string(),
+      modelName: v.string(),
+      modelVersion: v.string(),
+      tokenizerVersion: v.string(),
+      tokenizerFingerprint: v.string(),
+      datasetName: v.string(),
+      datasetVersion: v.string(),
+      datasetFingerprint: v.string(),
+      datasetLicense: v.string(),
+      corpusTokens: v.number(),
+      corpusDocuments: v.number(),
+      config: v.any(),
+      seed: v.number(),
+      step: v.number(),
+      totalSteps: v.number(),
+      epochs: v.optional(v.number()),
+      tokensSeen: v.number(),
+      trainLoss: v.optional(v.number()),
+      bestLoss: v.optional(v.number()),
+      validationLoss: v.optional(v.number()),
+      learningRate: v.optional(v.number()),
+      checkpointIds: v.array(v.string()),
+      lastCheckpointId: v.optional(v.string()),
+      resumedFromCheckpointId: v.optional(v.string()),
+      resumes: v.number(),
+      error: v.optional(v.string()),
+      startedAt: v.optional(v.number()),
+      completedAt: v.optional(v.number()),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+    })
+      .index("by_actor", ["actorId"])
+      .index("by_job", ["jobId"])
+      .index("by_actor_updated", ["actorId", "updatedAt"]),
 
     /** Workflow executions, including retries and outcomes. */
     alphaJobs: defineTable({

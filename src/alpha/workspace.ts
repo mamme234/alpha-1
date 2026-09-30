@@ -15,17 +15,49 @@
 import { alphaId, newTraceId, type AlphaStatus } from "./core/types";
 import type { AlphaModelStage } from "./core/types";
 import { AlphaError, describeError } from "./core/errors";
+import {
+  ALPHA_RESOURCE_LIMITS,
+  estimateTrainingMemory,
+  type TrainingMemoryEstimate,
+} from "./core/limits";
 import { AlphaConfig, createAlphaConfig, type AlphaConfigOverrides } from "./configs/alpha.config";
 import { ALPHA_MODULES } from "./modules";
 import { AlphaTransformer } from "./model/transformer";
-import { countParameters, createModelArtifact, type AlphaModelArtifact } from "./model/config";
+import {
+  countParameters,
+  createModelArtifact,
+  modelConfigFingerprint,
+  withSpecialTokenIds,
+  type AlphaModelArtifact,
+} from "./model/config";
 import { AlphaTokenizer, type AlphaTokenizerSnapshot } from "./tokenizer/bpe";
 import { ALPHA_SEED_CORPUS } from "./datasets/seed-corpus";
-import { datasetStats, type AlphaDataset } from "./datasets/types";
+import {
+  assertValidDataset,
+  datasetFingerprint,
+  datasetStats,
+  type AlphaDataset,
+} from "./datasets/types";
+import { corpusReport, type CorpusReport } from "./datasets/corpus";
 import { AlphaTrainer, type TrainingConfig, type TrainingEvent, type TrainingSummary } from "./training/trainer";
-import type { AlphaCheckpoint, AlphaCheckpointSummary } from "./training/checkpoint";
-import { summariseCheckpoint } from "./training/checkpoint";
+import {
+  assertCheckpointCompatible,
+  summariseCheckpoint,
+  type AlphaCheckpoint,
+  type AlphaCheckpointSummary,
+} from "./training/checkpoint";
+import {
+  createTrainingJob,
+  recordJobCheckpoint,
+  recordJobEvaluation,
+  recordJobStep,
+  summariseJob,
+  transitionJob,
+  type AlphaTrainingJob,
+} from "./training/job";
+import { verifyAlphaModel, type VerificationReport } from "./training/verify";
 import { AlphaInferenceEngine, type GenerationResult, type SamplingConfig } from "./inference/engine";
+import { AlphaInferenceService, type AlphaModelDescriptor } from "./inference/service";
 import { AlphaContextEngine, type AssembledContext } from "./context/engine";
 import { AlphaEmbedder } from "./embeddings/embedder";
 import { AlphaVectorStore, type VectorCollectionInfo, type VectorRecord } from "./vector/store";
@@ -64,6 +96,8 @@ export type AlphaPersistenceAdapter = {
   saveSpans?: (spans: Span[]) => void | Promise<void>;
   saveAudit?: (records: AuditRecord[]) => void | Promise<void>;
   saveRun?: (run: PersistedRunInput) => void | Promise<void>;
+  /** The training run record: id, state, references, metrics, checkpoints. */
+  saveTrainingJob?: (job: AlphaTrainingJob) => void | Promise<void>;
   saveWorkflow?: (workflow: AlphaWorkflow) => void | Promise<void>;
   saveJob?: (job: JobExecution) => void | Promise<void>;
 };
@@ -89,10 +123,22 @@ export type AlphaWorkspaceSnapshot = {
     stage: AlphaModelStage;
     parameterCount: number;
     config: AlphaTransformer["config"];
+    configFingerprint: string;
     trainedTokens: number;
     validationLoss: number | null;
     checkpointId: string | null;
   };
+  /** Models registered with the inference service, with their honest stages. */
+  models: AlphaModelDescriptor[];
+  /** Resource ceilings and a rough memory estimate for the configured run. */
+  resources: {
+    limits: typeof ALPHA_RESOURCE_LIMITS;
+    estimate: TrainingMemoryEstimate;
+  };
+  /** The corpus as the trainer will actually consume it. */
+  corpusReport: CorpusReport | null;
+  /** Result of the last A–I verification run, if one has been executed. */
+  verification: VerificationReport | null;
   tokenizer: {
     ready: boolean;
     version: string;
@@ -118,6 +164,12 @@ export type AlphaWorkspaceSnapshot = {
     lastSummary: TrainingSummary | null;
     checkpoint: AlphaCheckpointSummary | null;
     history: { step: number; loss: number; learningRate: number; gradNorm: number; elapsedMs: number }[];
+    /** The run record: id, state, seed, references, metrics, checkpoints. */
+    job: AlphaTrainingJob | null;
+    jobSummary: string | null;
+    /** Pause/stop requests take effect at the next optimiser step boundary. */
+    pauseRequested: boolean;
+    stopRequested: boolean;
   };
   inference: {
     requests: number;
@@ -184,6 +236,13 @@ export class AlphaWorkspace {
   readonly vectorStore = new AlphaVectorStore();
   readonly tools: AlphaToolRegistry;
   readonly dataset: AlphaDataset;
+  /**
+   * The transport-neutral generation interface. The workspace registers its
+   * current model here and everything that generates (workspace, RAG, agents,
+   * tools) goes through it, so there is exactly one place where weights are
+   * turned into tokens.
+   */
+  readonly inferenceService = new AlphaInferenceService();
 
   model: AlphaTransformer;
   tokenizer: AlphaTokenizer | null = null;
@@ -205,6 +264,13 @@ export class AlphaWorkspace {
   private errors: string[] = [];
   private initialised = false;
   private training = false;
+  /** The current training run record, if a run has been started in this session. */
+  private job: AlphaTrainingJob | null = null;
+  private pauseRequested = false;
+  private stopRequested = false;
+  /** True when a trainer is waiting to continue from a stored checkpoint. */
+  private pendingResume = false;
+  private verification: VerificationReport | null = null;
   private tokenizerSnapshot: AlphaTokenizerSnapshot | null = null;
   private lastContext: AssembledContext | null = null;
   private pendingSpans: Span[] = [];
@@ -213,6 +279,9 @@ export class AlphaWorkspace {
   constructor(options: AlphaWorkspaceOptions = {}) {
     this.config = createAlphaConfig(options.config);
     this.dataset = options.dataset ?? ALPHA_SEED_CORPUS;
+    // A malformed corpus is refused up front, not quietly reduced to whatever
+    // happened to be encodable.
+    assertValidDataset(this.dataset);
     this.seedDataset = this.dataset;
     this.persistence = options.persistence ?? null;
     this.ownerActorId = options.actorId ?? ALPHA_OWNER_ACTOR;
@@ -278,6 +347,37 @@ export class AlphaWorkspace {
     return this.modelStageDerived();
   }
 
+  /** The current training run record, if this session has started one. */
+  get trainingJob(): AlphaTrainingJob | null {
+    return this.job;
+  }
+
+  /** Result of the last A–I verification run, if one has been executed here. */
+  get lastVerification(): VerificationReport | null {
+    return this.verification;
+  }
+
+  /**
+   * Publish the current weights to the inference service under a stable id, so
+   * `generate({ modelId, prompt, generationConfig })` addresses exactly the
+   * model the workspace is holding — including its stage.
+   */
+  private registerModelHandle(): void {
+    const tokenizer = this.tokenizer;
+    if (!tokenizer) return;
+    const fingerprint = tokenizer.fingerprint();
+    this.inferenceService.registerModel({
+      id: AlphaInferenceService.modelId(this.model.config.name, this.model.config.version, fingerprint),
+      name: this.model.config.name,
+      version: this.model.config.version,
+      stage: this.modelStageDerived(),
+      model: this.model,
+      tokenizer,
+      contextLength: this.model.config.contextLength,
+      checkpointId: this.checkpoint?.id ?? null,
+    });
+  }
+
   /**
    * Stage derived from artefacts that actually exist: architecture before a
    * vocabulary is trained, untrained once the model is instantiable, and the
@@ -305,7 +405,12 @@ export class AlphaWorkspace {
     this.tokenizer = tokenizer;
     this.tokenizerSnapshot = tokenizer.toJSON();
 
-    const modelConfig = { ...this.config.model, vocabSize: Math.max(tokenizer.vocabSize, 64) };
+    // The model vocabulary is bound to the trained tokenizer: the size it
+    // actually produced plus the special-token ids it reserves.
+    const modelConfig = withSpecialTokenIds(
+      { ...this.config.model, vocabSize: Math.max(tokenizer.vocabSize, 64) },
+      tokenizer.specialTokenIds,
+    );
     this.model = new AlphaTransformer(modelConfig);
     this.embedder = new AlphaEmbedder({
       model: this.model,
@@ -319,6 +424,7 @@ export class AlphaWorkspace {
       tokenizer,
       stage: this.modelStageDerived(),
     });
+    this.registerModelHandle();
     this.rag = new AlphaRagPipeline({
       tokenizer,
       embedder: this.embedder,
@@ -480,6 +586,8 @@ export class AlphaWorkspace {
         rateLimiter: this.rateLimiter,
       });
     }
+    // The inference service must never serve a stale stage or stale weights.
+    this.registerModelHandle();
     this.observability.setModelStage(stage);
   }
 
@@ -492,6 +600,58 @@ export class AlphaWorkspace {
     if (this.training) {
       throw new AlphaError("alpha.training_in_progress", "training", "a training run is already in progress");
     }
+    // Continuing a run reuses the live trainer, so the optimiser moments, the
+    // RNG position and the history all carry over. Two cases continue a run:
+    // a paused job, and a run resumed from a stored checkpoint that still has
+    // steps to take. Anything else is a new run over the current weights.
+    const pausedJob = this.job !== null && this.job.state === "paused";
+    const pendingResume =
+      this.trainer !== null && this.pendingResume && this.trainer.step < this.trainer.config.totalSteps;
+    const continuing = this.trainer !== null && (pausedJob || pendingResume);
+
+    if (pausedJob && this.job) {
+      this.job = transitionJob(this.job, "running");
+    } else {
+      if (!continuing) {
+        // The run id is chosen here and given to both the trainer and the job,
+        // so a checkpoint, a log line and a job record always agree on which
+        // run they belong to.
+        const runId = alphaId("run");
+        this.trainer = new AlphaTrainer({
+          model: this.model,
+          tokenizer,
+          dataset: this.dataset,
+          config: { ...this.config.training, ...options },
+          checkpointLabel: `${this.model.config.name}-${this.checkpoint ? "finetune" : "scratch"}`,
+          isFineTune: Boolean(this.checkpoint),
+          runId,
+        });
+      }
+      this.pendingResume = false;
+      const started = this.trainer!;
+      const job = createTrainingJob({
+        modelName: this.model.config.name,
+        modelVersion: this.model.config.version,
+        tokenizerVersion: tokenizer.version,
+        tokenizerFingerprint: tokenizer.fingerprint(),
+        datasetName: this.dataset.name,
+        datasetVersion: this.dataset.version,
+        datasetFingerprint: datasetFingerprint(this.dataset),
+        datasetLicense: this.dataset.license,
+        corpusTokens: started.corpus.stats.totalTokens,
+        corpusDocuments: started.corpus.stats.documents,
+        config: started.config,
+        seed: started.config.seed,
+        resumedFromCheckpointId: this.checkpoint?.id ?? null,
+        id: started.runId,
+      });
+      this.job = transitionJob(job, "running");
+    }
+
+    const trainer = this.trainer!;
+    let job = this.job!;
+    this.pauseRequested = false;
+    this.stopRequested = false;
     this.training = true;
     const traceId = newTraceId();
     const span = this.observability.startSpan({
@@ -499,27 +659,37 @@ export class AlphaWorkspace {
       kind: "training",
       module: "training",
       traceId,
-      attributes: { dataset: this.dataset.name, license: this.dataset.license },
+      attributes: {
+        runId: job.id,
+        dataset: this.dataset.name,
+        datasetFingerprint: job.datasetFingerprint,
+        license: this.dataset.license,
+        seed: job.seed,
+        resumedFrom: job.resumedFromCheckpointId,
+      },
     });
 
     try {
-      const trainer = new AlphaTrainer({
-        model: this.model,
-        tokenizer,
-        dataset: this.dataset,
-        config: { ...this.config.training, ...options },
-        checkpointLabel: `${this.model.config.name}-seed`,
-        isFineTune: Boolean(this.checkpoint),
+      await this.persistence?.saveTrainingJob?.(job);
+      yield { type: "job", job };
+      const iterator = trainer.run({
+        shouldStop: () => {
+          if (this.stopRequested) return "stop";
+          if (this.pauseRequested) return "pause";
+          return null;
+        },
       });
-      this.trainer = trainer;
-      const iterator = trainer.run();
       let next = iterator.next();
       while (!next.done) {
         const event = next.value;
         if (event.type === "step") {
+          job = recordJobStep(job, event.point);
+          this.job = job;
           this.observability.recordTrainingStep(event.point, traceId);
         }
         if (event.type === "eval") {
+          job = recordJobEvaluation(job, event.evaluation);
+          this.job = job;
           this.observability.logger.log(
             "info",
             "training",
@@ -531,6 +701,9 @@ export class AlphaWorkspace {
         if (event.type === "checkpoint") {
           this.checkpoint = event.checkpoint;
           this.refreshQuality();
+          job = recordJobCheckpoint(job, event.checkpoint);
+          this.job = job;
+          await this.persistence?.saveTrainingJob?.(job);
           await this.persist("checkpoint");
           this.observability.setModelStage(event.checkpoint.stage, {
             step: event.checkpoint.step,
@@ -557,25 +730,36 @@ export class AlphaWorkspace {
         yield event;
         next = iterator.next();
       }
-      const summary = iterator.next().value as TrainingSummary | undefined;
-      const resolved: TrainingSummary =
-        summary ??
-        ({
-          steps: trainer.step,
-          tokensSeen: trainer.tokensSeen,
-          firstLoss: null,
-          lastLoss: null,
-          bestLoss: null,
-          validationLoss: null,
-          validationPerplexity: null,
-          uniformLossBaseline: trainer.uniformLoss,
-          durationMs: 0,
-          throughputTokensPerSecond: 0,
-          checkpoint: this.checkpoint,
-        } satisfies TrainingSummary);
+      const resolved = next.value;
+      if (!resolved) {
+        throw new AlphaError(
+          "alpha.training_no_summary",
+          "training",
+          "the training run ended without producing a summary",
+        );
+      }
       this.lastSummary = resolved;
+      // The trainer reports how the run ended; the job record mirrors it, and a
+      // paused run stays resumable instead of being marked finished.
+      if (resolved.state === "completed") {
+        this.job = transitionJob(job, "completed", {
+          step: trainer.step,
+          tokensSeen: trainer.tokensSeen,
+          trainLoss: resolved.lastLoss ?? job.trainLoss,
+          validationLoss: resolved.validationLoss ?? job.validationLoss,
+          bestLoss: resolved.bestLoss ?? job.bestLoss,
+        });
+      } else if (resolved.state === "paused") {
+        this.job = transitionJob(job, "paused", { step: trainer.step, tokensSeen: trainer.tokensSeen });
+      } else if (resolved.state === "stopped") {
+        this.job = transitionJob(job, "stopped", { step: trainer.step, tokensSeen: trainer.tokensSeen });
+      }
+      await this.persistence?.saveTrainingJob?.(this.job);
+      yield { type: "job", job: this.job };
       this.observability.endSpan(span, {
         attributes: {
+          runId: this.job.id,
+          state: this.job.state,
           steps: resolved.steps,
           firstLoss: resolved.firstLoss,
           lastLoss: resolved.lastLoss,
@@ -588,6 +772,15 @@ export class AlphaWorkspace {
       this.errors.push(described.message);
       this.observability.recordError("training", described.message);
       this.observability.endSpan(span, { status: "error", error: described.message });
+      if (this.job && (this.job.state === "running" || this.job.state === "paused")) {
+        try {
+          this.job = transitionJob(this.job, "failed", { error: described.message });
+          await this.persistence?.saveTrainingJob?.(this.job);
+        } catch {
+          // A run that cannot even be marked failed must not mask the original
+          // error, which is what the caller actually needs to see.
+        }
+      }
       throw error;
     } finally {
       this.training = false;
@@ -595,31 +788,122 @@ export class AlphaWorkspace {
   }
 
   /**
+   * Ask the running job to pause. It takes effect at the next optimiser step
+   * boundary: the trainer writes a checkpoint, records the run as paused and
+   * returns, leaving the run resumable rather than restartable.
+   */
+  pauseTraining(): AlphaTrainingJob | null {
+    if (!this.job || this.job.state !== "running") return this.job;
+    this.pauseRequested = true;
+    return this.job;
+  }
+
+  /**
+   * Clear a pause request. The caller then drives `train()` again in streaming
+   * form: the same trainer continues from the step it stopped at.
+   */
+  resumeTraining(): AlphaTrainingJob | null {
+    if (!this.job) return null;
+    this.pauseRequested = false;
+    return this.job;
+  }
+
+  /** Ask the running job to stop for good. It is not resumable afterwards. */
+  stopTraining(): AlphaTrainingJob | null {
+    if (!this.job || (this.job.state !== "running" && this.job.state !== "paused")) return this.job;
+    this.stopRequested = true;
+    return this.job;
+  }
+
+  /**
+   * Run the deterministic A–I verification suite.
+   *
+   * Verification trains its own fresh instance of the configured architecture,
+   * so the weights this workspace is holding are never disturbed by it. That is
+   * stated here because a verification that silently retrained the live model
+   * would be a lie about what was verified.
+   */
+  verify(options: { training?: Partial<TrainingConfig>; prompt?: string } = {}): VerificationReport {
+    const tokenizer = this.tokenizer;
+    if (!tokenizer) {
+      throw new AlphaError("alpha.not_initialised", "core", "workspace must be initialised before verification");
+    }
+    const span = this.observability.startSpan({ name: "training.verify", kind: "training", module: "training" });
+    const report = verifyAlphaModel({
+      model: new AlphaTransformer({ ...this.model.config }),
+      tokenizer,
+      dataset: this.dataset,
+      training: options.training,
+      prompt: options.prompt ?? "Alpha is a self owned",
+    });
+    this.verification = report;
+    this.observability.endSpan(span, {
+      status: report.passed ? "ok" : "error",
+      attributes: {
+        passed: report.passed,
+        failed: report.checks.filter((check) => !check.passed).map((check) => check.id).join(","),
+      },
+    });
+    if (!report.passed) {
+      this.errors.push(`verification failed: ${report.checks.filter((c) => !c.passed).map((c) => c.id).join(", ")}`);
+    }
+    return report;
+  }
+
+  /**
+   * The corpus as the trainer will consume it: documents, tokens, vocabulary,
+   * split sizes, example counts, sequence length and batch size.
+   */
+  corpusSummary(options: { seqLen?: number; batchSize?: number } = {}): CorpusReport {
+    const tokenizer = this.tokenizer;
+    if (!tokenizer) {
+      throw new AlphaError("alpha.not_initialised", "core", "workspace must be initialised before reading the corpus");
+    }
+    return corpusReport(this.dataset, tokenizer, {
+      seqLen: options.seqLen ?? this.config.training.seqLen,
+      batchSize: options.batchSize ?? this.config.training.batchSize,
+      validationFraction: this.config.training.validationFraction,
+    });
+  }
+
+  /**
    * Restore Alpha from a stored checkpoint and continue from its step.
    * The vocabulary must match, because weights loaded into a different
    * architecture would silently mean nothing.
    */
-  resumeFrom(checkpoint: AlphaCheckpoint): void {
+  resumeFrom(checkpoint: AlphaCheckpoint, options: { totalSteps?: number } = {}): void {
     const { tokenizer } = this.requireReady();
-    if (checkpoint.config.vocabSize !== this.model.config.vocabSize) {
-      throw new AlphaError(
-        "alpha.checkpoint_mismatch",
-        "training",
-        `checkpoint vocabulary (${checkpoint.config.vocabSize}) does not match the current model (${this.model.config.vocabSize})`,
-      );
-    }
+    // Architecture, vocabulary and tokenizer fingerprint must all match, or the
+    // weights would load into shape-compatible but meaningless positions.
+    assertCheckpointCompatible(checkpoint, { config: this.model.config, tokenizer });
+
     this.model.loadWeights(checkpoint.weights);
     this.checkpoint = checkpoint;
+
+    // Continue with the configuration the run was started with, so the
+    // schedule and step budget are the same run rather than a new one. If the
+    // checkpoint is already at its recorded end, the caller extends it (or we
+    // extend by a single step so a resume is never a silent no-op).
+    const recorded = checkpoint.trainingConfig;
+    const requestedTotal = options.totalSteps ?? recorded.totalSteps;
+    const totalSteps =
+      requestedTotal > checkpoint.step ? requestedTotal : Math.max(requestedTotal, checkpoint.step + 1);
     const trainer = new AlphaTrainer({
       model: this.model,
       tokenizer,
       dataset: this.dataset,
-      config: this.config.training,
+      config: { ...recorded, totalSteps },
       checkpointLabel: checkpoint.label,
+      runId: checkpoint.runId,
       isFineTune: true,
     });
     trainer.resumeFrom(checkpoint);
     this.trainer = trainer;
+    // A run resumed from a checkpoint continues that run's record; `train()`
+    // sees the pending resume and continues this trainer rather than building a
+    // fresh model.
+    this.job = null;
+    this.pendingResume = true;
     this.refreshQuality();
     this.observability.setModelStage(checkpoint.stage, {
       reason: "resumed from a stored checkpoint",
@@ -629,8 +913,12 @@ export class AlphaWorkspace {
     this.observability.logger.log(
       "info",
       "workspace",
-      `resumed ${checkpoint.modelName} at step ${checkpoint.step}`,
-      { validationLoss: checkpoint.metrics.validationLoss },
+      `resumed ${checkpoint.modelName} at step ${checkpoint.step} toward ${totalSteps} (run ${checkpoint.runId})`,
+      {
+        validationLoss: checkpoint.metrics.validationLoss,
+        datasetFingerprint: checkpoint.datasetFingerprint,
+        tokenizerFingerprint: checkpoint.tokenizer.fingerprint,
+      },
     );
   }
 
@@ -974,10 +1262,27 @@ export class AlphaWorkspace {
         stage: this.modelStageDerived(),
         parameterCount: this.model.parameterCount,
         config: this.model.config,
+        configFingerprint: modelConfigFingerprint(this.model.config),
         trainedTokens: this.checkpoint?.tokensSeen ?? 0,
         validationLoss: this.checkpoint?.metrics.validationLoss ?? null,
         checkpointId: this.checkpoint?.id ?? null,
       },
+      models: this.inferenceService.listModels(),
+      resources: {
+        limits: ALPHA_RESOURCE_LIMITS,
+        estimate: estimateTrainingMemory(this.model.config, {
+          batchSize: this.trainer?.config.batchSize ?? this.config.training.batchSize,
+          seqLen: this.trainer?.config.seqLen ?? this.config.training.seqLen,
+        }),
+      },
+      corpusReport: tokenizer
+        ? corpusReport(this.dataset, tokenizer, {
+            seqLen: this.trainer?.config.seqLen ?? this.config.training.seqLen,
+            batchSize: this.trainer?.config.batchSize ?? this.config.training.batchSize,
+            validationFraction: this.config.training.validationFraction,
+          })
+        : null,
+      verification: this.verification,
       tokenizer: {
         ready: Boolean(tokenizer),
         version: tokenizer?.version ?? this.config.tokenizer.version,
@@ -1001,6 +1306,10 @@ export class AlphaWorkspace {
           gradNorm: point.gradNorm,
           elapsedMs: point.elapsedMs,
         })),
+        job: this.job,
+        jobSummary: this.job ? summariseJob(this.job) : null,
+        pauseRequested: this.pauseRequested,
+        stopRequested: this.stopRequested,
       },
       inference: {
         requests: inferenceMetrics.value("alpha.inference.requests"),

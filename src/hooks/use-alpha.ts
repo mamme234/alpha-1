@@ -14,7 +14,10 @@ import {
   ALPHA_SEED_CORPUS,
   AlphaWorkspace,
   datasetStats,
+  newTraceId,
+  parseCheckpoint,
   type AlphaCheckpoint,
+  type AlphaTrainingJob,
   type AlphaWorkspaceSnapshot,
   type AgentRunResult,
   type GenerationResult,
@@ -26,6 +29,7 @@ import {
   type SamplingConfig,
   type TrainingConfig,
   type TrainingSummary,
+  type VerificationReport,
 } from "@/alpha";
 import { useConvex, useMutation, useQuery } from "convex/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -49,7 +53,18 @@ export type ChatTurn = {
   sources: RagAnswer["sources"];
   mode: "generate" | "rag";
   at: number;
+  /** Correlation id for this request, stored beside the transcript entry. */
+  requestId: string;
+  /** Set when this turn failed; the real message, not a placeholder. */
+  error?: string | null;
 };
+
+/** Anything thrown becomes a printable message for the UI and the transcript. */
+function alphaErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  return "Alpha could not complete that request.";
+}
 
 export type AgentRunSummary = {
   id: string;
@@ -80,6 +95,13 @@ export function useAlpha() {
   sessionTokenRef.current = sessionToken;
   const requireToken = () => sessionTokenRef.current ?? "";
 
+  /**
+   * The latest workspace snapshot, readable from callbacks without making them
+   * re-create on every render. Used to label a stored turn with the model that
+   * actually produced it — never as a second source of truth.
+   */
+  const snapshotRef = useRef<AlphaWorkspaceSnapshot | null>(null);
+
   const recordModel = useMutation(api.alpha.models.record);
   const saveTokenizer = useMutation(api.alpha.training.saveTokenizer);
   const saveCheckpoint = useMutation(api.alpha.training.saveCheckpoint);
@@ -88,6 +110,7 @@ export function useAlpha() {
   const saveSpans = useMutation(api.alpha.observability.recordSpans);
   const saveAudit = useMutation(api.alpha.observability.appendAudit);
   const recordRun = useMutation(api.alpha.observability.recordRun);
+  const saveTrainingJob = useMutation(api.alpha.training.saveTrainingJob);
   const saveWorkflow = useMutation(api.alpha.workflows.saveWorkflow);
   const saveJob = useMutation(api.alpha.workflows.saveJob);
   const syncTools = useMutation(api.alpha.tools.syncTools);
@@ -106,6 +129,7 @@ export function useAlpha() {
     saveSpans: (args) => saveSpans({ ...args, sessionToken: requireToken() }),
     saveAudit: (args) => saveAudit({ ...args, sessionToken: requireToken() }),
     recordRun: (args) => recordRun({ ...args, sessionToken: requireToken() }),
+    saveTrainingJob: (args) => saveTrainingJob({ ...args, sessionToken: requireToken() }),
     saveWorkflow: (args) => saveWorkflow({ ...args, sessionToken: requireToken() }),
     saveJob: (args) => saveJob({ ...args, sessionToken: requireToken() }),
     syncTools: (args) => syncTools({ ...args, sessionToken: requireToken() }),
@@ -123,17 +147,33 @@ export function useAlpha() {
    * Store one exchange. Best-effort by design: a storage problem must never
    * lose the generation the user just watched appear.
    */
+  /**
+   * Store one exchange. Best-effort by design: a storage problem must never
+   * lose the generation the user just watched appear. Every assistant turn
+   * records which model produced it, at which stage, with which generation
+   * configuration, and the request id — so a stored transcript can be audited.
+   */
   const recordTurn = useCallback(
     async (turn: {
+      requestId: string;
       prompt: string;
       answer: string;
       mode: "generate" | "rag";
       result: GenerationResult | null;
       sources: RagAnswer["sources"];
+      error?: string | null;
     }) => {
       try {
         const token = requireToken();
         if (!token) return;
+        // Which published model produced this turn. The workspace registers a
+        // single handle, so match it by name and version rather than guessing.
+        const published = snapshotRef.current;
+        const modelId = published
+          ? (published.models.find(
+              (entry) => entry.name === published.model.name && entry.version === published.model.version,
+            )?.id ?? published.models[0]?.id)
+          : undefined;
         let conversationId = conversationRef.current;
         if (!conversationId) {
           const created = await startConversation({ sessionToken: token, title: turn.prompt.slice(0, 80), kind: turn.mode });
@@ -153,6 +193,14 @@ export function useAlpha() {
           })),
           modelStage: turn.result?.modelStage,
           tokens: turn.result?.generatedTokens,
+          modelId,
+          modelVersion: turn.result ? snapshotRef.current?.model.version : undefined,
+          generationConfig: turn.result?.sampling ?? undefined,
+          requestId: turn.requestId,
+          traceId: turn.requestId,
+          latencyMs: turn.result?.latencyMs,
+          stopReason: turn.result?.stopReason,
+          error: turn.error ?? undefined,
         });
       } catch (error) {
         console.warn("[alpha] conversation not stored:", error);
@@ -179,6 +227,9 @@ export function useAlpha() {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [agentRuns, setAgentRuns] = useState<AgentRunSummary[]>([]);
   const [streaming, setStreaming] = useState<string | null>(null);
+
+  // Keep the ref in step with the state so callbacks read the current snapshot.
+  snapshotRef.current = snapshot;
 
   useEffect(() => {
     if (!actorId) return;
@@ -266,7 +317,9 @@ export function useAlpha() {
     async (options: Partial<TrainingConfig> = {}): Promise<TrainingSummary | null> => {
       const active = runtime?.workspace;
       if (!active || active.isTraining) return null;
-      const totalSteps = Number(options.totalSteps ?? 60);
+      // A continued run keeps the step budget the run was started with; a fresh
+      // run uses the requested steps or the configured default.
+      const totalSteps = Number(options.totalSteps ?? active.snapshot().training.totalSteps);
       setBusy("training");
       setTraining({
         running: true,
@@ -311,6 +364,20 @@ export function useAlpha() {
               previous ? { ...previous, validationLoss: event.evaluation.loss } : previous,
             );
           }
+          if (event.type === "job") {
+            // Emitted when the run starts and again when it settles. This is the
+            // run record the UI reads, not a value invented here.
+            setTraining((previous) =>
+              previous
+                ? {
+                    ...previous,
+                    running: event.job.state === "running",
+                    step: event.job.step,
+                    totalSteps: event.job.totalSteps,
+                  }
+                : previous,
+            );
+          }
           next = await iterator.next();
         }
         const summary = next.value;
@@ -344,31 +411,16 @@ export function useAlpha() {
     try {
       const row = await convex.query(api.alpha.training.latestCheckpoint, { sessionToken: requireToken() });
       if (!row) return null;
-      const checkpoint: AlphaCheckpoint = {
-        id: row.checkpointId,
-        label: row.label,
-        modelName: row.modelName,
-        modelVersion: row.modelVersion,
-        config: row.config as AlphaCheckpoint["config"],
-        tokenizerVersion: active.snapshot().tokenizer.version,
-        datasetName: row.datasetName,
-        datasetLicense: row.datasetLicense,
-        step: row.step,
-        tokensSeen: row.tokensSeen,
-        learningRate: row.learningRate,
-        metrics: {
-          trainLoss: row.trainLoss,
-          validationLoss: row.validationLoss ?? null,
-          validationPerplexity: null,
-        },
-        weights: JSON.parse(row.weights) as AlphaCheckpoint["weights"],
-        optimizer: JSON.parse(row.optimizer) as AlphaCheckpoint["optimizer"],
-        rng: row.rng as AlphaCheckpoint["rng"],
-        createdAt: row.createdAt,
-        sizeBytes: row.sizeBytes,
-        stage: row.stage as AlphaCheckpoint["stage"],
-        notes: [`Restored from Convex at ${new Date().toLocaleString()}.`],
-      };
+      const stored = row.checkpoint;
+      if (!stored) {
+        // Rows written before the payload was stored in full cannot be restored
+        // exactly, and reassembling a lookalike would not be the same artefact.
+        console.warn("[alpha] the latest stored checkpoint carries no payload");
+        return null;
+      }
+      // The complete document is stored, so restore the exact checkpoint: format
+      // version, run id, seed, tokenizer snapshot, optimiser moments and RNG.
+      const checkpoint: AlphaCheckpoint = parseCheckpoint(stored);
       active.resumeFrom(checkpoint);
       return checkpoint;
     } catch (error) {
@@ -387,12 +439,14 @@ export function useAlpha() {
       setBusy(mode === "rag" ? "retrieving" : "generating");
       setStreaming("");
       const id = `turn_${Date.now()}`;
+      const requestId = newTraceId();
       try {
         if (mode === "rag") {
           const answer = active.ask(prompt, sampling);
           setTurns((previous) => [
             {
               id,
+              requestId,
               prompt,
               answer: answer.answer,
               result: answer.generation,
@@ -403,6 +457,7 @@ export function useAlpha() {
             ...previous,
           ]);
           await recordTurn({
+            requestId,
             prompt,
             answer: answer.answer,
             mode,
@@ -422,15 +477,33 @@ export function useAlpha() {
         const result = next.value;
         if (result) {
           setTurns((previous) => [
-            { id, prompt, answer: result.text, result, sources: [], mode, at: Date.now() },
+            { id, requestId, prompt, answer: result.text, result, sources: [], mode, at: Date.now() },
             ...previous,
           ]);
-          await recordTurn({ prompt, answer: result.text, mode, result, sources: [] });
+          await recordTurn({ requestId, prompt, answer: result.text, mode, result, sources: [] });
         }
         setStreaming(null);
         return result;
       } catch (error) {
+        // The real message is stored and shown. A failed generation is reported
+        // as a failure, never papered over with a plausible-looking answer.
+        const message = alphaErrorMessage(error);
         console.error("[alpha] generation failed", error);
+        setTurns((previous) => [
+          {
+            id,
+            requestId,
+            prompt,
+            answer: "",
+            result: null,
+            sources: [],
+            mode,
+            at: Date.now(),
+            error: message,
+          },
+          ...previous,
+        ]);
+        await recordTurn({ requestId, prompt, answer: "", mode, result: null, sources: [], error: message });
         setStreaming(null);
         return null;
       } finally {
@@ -522,6 +595,57 @@ export function useAlpha() {
 
   const persistAll = useCallback(() => run("persisting", (ws) => ws.persist("all")), [run]);
 
+  /**
+   * Ask the running run to pause. It takes effect at the next optimiser step
+   * boundary, where the trainer writes a checkpoint and returns; the run stays
+   * resumable rather than being restarted from scratch.
+   */
+  const pauseTraining = useCallback((): AlphaTrainingJob | null => {
+    const active = runtime?.workspace;
+    if (!active) return null;
+    const job = active.pauseTraining();
+    setSnapshot(active.snapshot());
+    return job;
+  }, []);
+
+  /** Ask the running run to stop for good. It is not resumable afterwards. */
+  const stopTraining = useCallback((): AlphaTrainingJob | null => {
+    const active = runtime?.workspace;
+    if (!active) return null;
+    const job = active.stopTraining();
+    setSnapshot(active.snapshot());
+    return job;
+  }, []);
+
+  /**
+   * Continue a paused run. The workspace keeps the live trainer, so optimiser
+   * moments and the RNG position carry over instead of being re-derived.
+   */
+  const resumeTraining = useCallback(
+    async (options: Partial<TrainingConfig> = {}): Promise<TrainingSummary | null> => {
+      runtime?.workspace.resumeTraining();
+      return train(options);
+    },
+    [train],
+  );
+
+  /**
+   * Run the deterministic A–I verification suite. It trains its own fresh
+   * instance of the architecture, so the weights in this session are untouched.
+   */
+  const verify = useCallback(
+    (options: { training?: Partial<TrainingConfig>; prompt?: string } = {}) =>
+      run("verifying", async (ws) => ws.verify(options)),
+    [run],
+  );
+
+  /** Re-derive the corpus report for a given sequence length and batch size. */
+  const measureCorpus = useCallback(
+    (options: { seqLen?: number; batchSize?: number } = {}) =>
+      run("corpus", async (ws) => ws.corpusSummary(options)),
+    [run],
+  );
+
   return useMemo(
     () => ({
       actorId,
@@ -541,6 +665,17 @@ export function useAlpha() {
       refresh,
       train,
       resumeFromStored,
+      pauseTraining,
+      resumeTraining,
+      stopTraining,
+      verify,
+      measureCorpus,
+      trainingJob: snapshot?.training.job ?? null,
+      jobSummary: snapshot?.training.jobSummary ?? null,
+      verification: snapshot?.verification ?? null,
+      corpusReport: snapshot?.corpusReport ?? null,
+      resources: snapshot?.resources ?? null,
+      alphaErrorMessage,
       generate,
       ingest,
       removeDocument,
@@ -568,6 +703,11 @@ export function useAlpha() {
       refresh,
       train,
       resumeFromStored,
+      pauseTraining,
+      resumeTraining,
+      stopTraining,
+      verify,
+      measureCorpus,
       generate,
       ingest,
       removeDocument,

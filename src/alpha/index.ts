@@ -43,6 +43,7 @@ export {
 } from "./core/tensor";
 export { AlphaRng, type RngState } from "./core/rng";
 export {
+  AlphaCheckpointError,
   AlphaError,
   AlphaNotImplementedError,
   AlphaPermissionError,
@@ -69,6 +70,15 @@ export {
   type AlphaStatus,
 } from "./core/types";
 export { base64ToFloat32, float32ToBase64 } from "./core/serialize";
+export {
+  ALPHA_RESOURCE_LIMITS,
+  assertResourceLimit,
+  countParametersFromConfig,
+  estimateParameterBytes,
+  estimateTrainingMemory,
+  type AlphaResourceKind,
+  type TrainingMemoryEstimate,
+} from "./core/limits";
 
 // --- model ------------------------------------------------------------------
 export {
@@ -78,10 +88,13 @@ export {
   createModelConfig,
   deriveStage,
   describeArchitecture,
+  modelConfigFingerprint,
   validateModelConfig,
+  withSpecialTokenIds,
   type AlphaModelArtifact,
   type AlphaModelConfig,
   type AlphaModelPreset,
+  type AlphaSpecialTokenIds,
   type ArchitectureTensorRow,
   type PositionalEncodingKind,
 } from "./model/config";
@@ -107,13 +120,31 @@ export {
 
 // --- datasets ---------------------------------------------------------------
 export {
+  assertValidDataset,
   createDataset,
+  datasetFingerprint,
+  datasetReference,
   datasetStats,
   splitDocuments,
+  validateDataset,
   type AlphaDataset,
+  type DatasetIssue,
   type DatasetStats,
+  type DatasetValidation,
 } from "./datasets/types";
-export { BatchSampler, encodeCorpus, type EncodedCorpus, type TrainingBatch } from "./datasets/corpus";
+export {
+  BatchSampler,
+  DocumentBatchSampler,
+  countTrainingExamples,
+  corpusReport,
+  encodeCorpus,
+  padSequences,
+  type CorpusReport,
+  type CorpusStats,
+  type EncodeCorpusOptions,
+  type EncodedCorpus,
+  type TrainingBatch,
+} from "./datasets/corpus";
 export { ALPHA_SEED_CORPUS, seedCorpusSlice } from "./datasets/seed-corpus";
 
 // --- training ---------------------------------------------------------------
@@ -133,19 +164,30 @@ export {
   type ScheduleKind,
 } from "./training/schedule";
 export {
+  ALPHA_CHECKPOINT_FORMAT_VERSION,
+  assertCheckpointCompatible,
+  assertValidCheckpoint,
   checkpointToJson,
+  compareCheckpoints,
   createCheckpoint,
   estimateCheckpointBytes,
   parseCheckpoint,
   summariseCheckpoint,
+  validateCheckpoint,
+  withCheckpointId,
   type AlphaCheckpoint,
   type AlphaCheckpointMetrics,
   type AlphaCheckpointSummary,
+  type CheckpointCompatibility,
+  type CheckpointTokenizerRef,
+  type CheckpointValidation,
+  type CreateCheckpointInput,
 } from "./training/checkpoint";
 export {
   AlphaTrainer,
   DEFAULT_TRAINING_CONFIG,
   createTrainingConfig,
+  type BatchMode,
   type EvaluationResult,
   type TrainerOptions,
   type TrainingConfig,
@@ -153,6 +195,48 @@ export {
   type TrainingMetricPoint,
   type TrainingSummary,
 } from "./training/trainer";
+export {
+  numericalGradientCheck,
+  type GradientCheckBatch,
+  type GradientCheckOptions,
+  type GradientCheckReport,
+} from "./training/gradients";
+export {
+  TRAINING_JOB_STATES,
+  TRAINING_JOB_TRANSITIONS,
+  canTransitionJob,
+  createTrainingJob,
+  failJob,
+  jobProgress,
+  recordJobCheckpoint,
+  recordJobEvaluation,
+  recordJobStep,
+  summariseJob,
+  trainingJobStateLabel,
+  transitionJob,
+  validateTrainingJob,
+  type AlphaTrainingJob,
+  type CreateTrainingJobInput,
+  type TrainingJobState,
+  type TrainingJobStateLabel,
+} from "./training/job";
+export {
+  DEFAULT_VERIFY_TRAINING,
+  verifyAlphaModel,
+  type VerificationCheck,
+  type VerificationCheckId,
+  type VerificationReport,
+  type VerifyAlphaModelOptions,
+} from "./training/verify";
+export {
+  DEFAULT_LIFECYCLE_TRAINING,
+  formatLifecycleReport,
+  runAlphaTrainingLifecycle,
+  type AlphaLifecycleReport,
+  type LifecycleOptions,
+  type LifecycleStage,
+  type LifecycleStageName,
+} from "./training/lifecycle";
 
 // --- context engine ---------------------------------------------------------
 export {
@@ -168,14 +252,25 @@ export {
 export {
   AlphaInferenceEngine,
   DEFAULT_SAMPLING,
+  SAMPLING_PRESETS,
   argmax,
   meanNll,
+  untrainedWarning,
   type GenerationResult,
   type GenerationStreamChunk,
   type InferenceEngineOptions,
   type SamplingConfig,
   type StopReason,
 } from "./inference/engine";
+export {
+  AlphaInferenceService,
+  type AlphaModelDescriptor,
+  type AlphaModelHandle,
+  type GenerateRequest,
+  type GenerateStreamRequest,
+  type RegisterModelInput,
+  type ScoreRequest,
+} from "./inference/service";
 
 // --- embeddings -------------------------------------------------------------
 export {

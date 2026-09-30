@@ -68,6 +68,17 @@ export const appendMessage = mutation({
     modelStage: v.optional(v.string()),
     tokens: v.optional(v.number()),
     traceId: v.optional(v.string()),
+    /** Which model and vocabulary produced this turn. */
+    modelId: v.optional(v.string()),
+    modelVersion: v.optional(v.string()),
+    /** The sampling configuration this turn was generated with. */
+    generationConfig: v.optional(v.any()),
+    /** Request id for the inference call that produced this turn. */
+    requestId: v.optional(v.string()),
+    latencyMs: v.optional(v.number()),
+    stopReason: v.optional(v.string()),
+    /** Set when generation failed, so a failure is stored rather than hidden. */
+    error: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const actorId = await requireActorId(ctx, args.sessionToken);
@@ -91,6 +102,13 @@ export const appendMessage = mutation({
       modelStage: args.modelStage,
       tokens: args.tokens,
       traceId: args.traceId,
+      modelId: args.modelId,
+      modelVersion: args.modelVersion,
+      generationConfig: args.generationConfig,
+      requestId: args.requestId ?? args.traceId,
+      latencyMs: args.latencyMs,
+      stopReason: args.stopReason,
+      error: args.error,
       createdAt: now,
     });
 

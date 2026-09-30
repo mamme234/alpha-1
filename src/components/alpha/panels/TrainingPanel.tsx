@@ -9,13 +9,16 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { EmptyNote, Eyebrow, Frame, KeyValue, Mono, Stat, StatGrid } from "@/components/alpha/studio";
-import { formatBytes, type TrainingConfig } from "@/alpha";
+import { EmptyNote, Eyebrow, Frame, KeyValue, Mono, Pill, Stat, StatGrid, WarningNote } from "@/components/alpha/studio";
+import { formatBytes, trainingJobStateLabel, type TrainingConfig } from "@/alpha";
 import type { AlphaRuntime } from "@/hooks/use-alpha";
 import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useState } from "react";
-import { Loader2, Play, RotateCcw } from "lucide-react";
+import { Loader2, Pause, Play, RotateCcw, ShieldCheck, Square } from "lucide-react";
 import { toast } from "sonner";
+
+/** Loss values are printed to four places, or as an em dash when unmeasured. */
+const loss = (value: number | null | undefined) => (value === null || value === undefined ? "—" : value.toFixed(4));
 
 export function TrainingPanel({ alpha }: { alpha: AlphaRuntime }) {
   const snapshot = alpha.snapshot;
@@ -28,6 +31,11 @@ export function TrainingPanel({ alpha }: { alpha: AlphaRuntime }) {
   const progress = alpha.training;
   const history = progress?.history ?? snapshot?.training.history.map((point) => ({ step: point.step, loss: point.loss })) ?? [];
   const uniformLoss = progress?.uniformLoss ?? (snapshot ? Math.log(snapshot.tokenizer.vocabSize) : null);
+  const job = alpha.trainingJob;
+  const jobSummary = alpha.jobSummary;
+  const verification = alpha.verification;
+  const corpus = alpha.corpusReport ?? snapshot?.corpusReport ?? null;
+  const resources = alpha.resources ?? snapshot?.resources ?? null;
 
   const startTraining = async () => {
     const overrides: Partial<TrainingConfig> = {
@@ -59,6 +67,40 @@ export function TrainingPanel({ alpha }: { alpha: AlphaRuntime }) {
     }
   };
 
+  /** A pause is a request: the trainer honours it at the next step boundary. */
+  const pause = () => {
+    alpha.pauseTraining();
+    toast.message("Pause requested — it takes effect at the next optimiser step");
+  };
+
+  const stop = () => {
+    alpha.stopTraining();
+    toast.message("Stop requested — the run writes a checkpoint and ends");
+  };
+
+  const continueRun = async () => {
+    const summary = await alpha.resumeTraining();
+    if (!summary) {
+      toast.error("The run could not continue");
+      return;
+    }
+    toast.success(`Run ${summary.state} at step ${summary.steps} (loss ${loss(summary.lastLoss)})`);
+  };
+
+  const runVerification = async () => {
+    const report = await alpha.verify();
+    if (!report) {
+      toast.error("Verification could not run");
+      return;
+    }
+    const failed = report.checks.filter((check) => !check.passed).map((check) => check.id);
+    if (report.passed) {
+      toast.success(`Verification passed: all ${report.checks.length} checks (A–I) on a fresh model instance`);
+    } else {
+      toast.error(`Verification failed: ${failed.join(", ")}`);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <Frame
@@ -67,6 +109,24 @@ export function TrainingPanel({ alpha }: { alpha: AlphaRuntime }) {
         lede="Corpus → token window → forward pass → cross-entropy → backpropagation through Alpha's own autodiff → AdamW. Real gradients, real updates, in this tab."
         actions={
           <>
+            {job?.state === "running" ? (
+              <Button variant="outline" size="sm" onClick={pause}>
+                <Pause className="mr-2 size-3.5" />
+                Pause
+              </Button>
+            ) : null}
+            {job?.state === "paused" ? (
+              <Button variant="outline" size="sm" onClick={continueRun} disabled={Boolean(alpha.busy)}>
+                <Play className="mr-2 size-3.5" />
+                Continue run
+              </Button>
+            ) : null}
+            {job && (job.state === "running" || job.state === "paused") ? (
+              <Button variant="outline" size="sm" onClick={stop}>
+                <Square className="mr-2 size-3.5" />
+                Stop
+              </Button>
+            ) : null}
             <Button variant="outline" size="sm" onClick={resume} disabled={Boolean(alpha.busy)}>
               <RotateCcw className="mr-2 size-3.5" />
               Resume from store
@@ -240,6 +300,108 @@ export function TrainingPanel({ alpha }: { alpha: AlphaRuntime }) {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Frame
+          title="Run record"
+          status={job ? (job.state === "completed" ? "ready" : job.state === "failed" ? "untrained" : "in-development") : "untrained"}
+          lede="One record per run: what was trained, on which corpus and tokenizer, from which checkpoint, with what result. Written at every step and kept in Convex."
+          actions={job ? <Pill>{trainingJobStateLabel(job.state)}</Pill> : null}
+        >
+          {job ? (
+            <div>
+              <KeyValue label="run id">{job.id}</KeyValue>
+              <KeyValue label="model">{`${job.modelName} ${job.modelVersion}`}</KeyValue>
+              <KeyValue label="tokenizer">{`${job.tokenizerVersion} · ${job.tokenizerFingerprint}`}</KeyValue>
+              <KeyValue label="dataset">{`${job.datasetName}@${job.datasetVersion} · ${job.datasetLicense}`}</KeyValue>
+              <KeyValue label="dataset fingerprint">{job.datasetFingerprint}</KeyValue>
+              <KeyValue label="seed">{job.seed}</KeyValue>
+              <KeyValue label="step">{`${job.step} / ${job.totalSteps}`}</KeyValue>
+              <KeyValue label="tokens seen">{job.tokensSeen.toLocaleString()}</KeyValue>
+              <KeyValue label="epochs over corpus">{job.epochs === null ? "—" : job.epochs.toFixed(3)}</KeyValue>
+              <KeyValue label="train loss">{loss(job.trainLoss)}</KeyValue>
+              <KeyValue label="best loss">{loss(job.bestLoss)}</KeyValue>
+              <KeyValue label="validation loss">{loss(job.validationLoss)}</KeyValue>
+              <KeyValue label="checkpoints">{job.checkpointIds.length}</KeyValue>
+              <KeyValue label="resumed from">{job.resumedFromCheckpointId ?? "— new run"}</KeyValue>
+              <KeyValue label="resumes">{job.resumes}</KeyValue>
+              {job.error ? (
+                <div className="mt-4">
+                  <WarningNote>This run failed: {job.error}</WarningNote>
+                </div>
+              ) : null}
+              <ul className="mt-4 space-y-1">
+                {job.notes.map((note) => (
+                  <li key={note} className="text-[11px] leading-4 text-muted-foreground">
+                    · {note}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <EmptyNote>
+              No run has been started in this session. The record is created when you press Train Alpha, and every checkpoint it
+              writes quotes its run id.
+            </EmptyNote>
+          )}
+          {jobSummary ? <p className="mt-4"><Mono>{jobSummary}</Mono></p> : null}
+        </Frame>
+
+        <Frame
+          title="Verification — checks A–I"
+          status={verification ? (verification.passed ? "ready" : "untrained") : "in-development"}
+          lede="Deterministic checks on a fresh instance of the configured architecture: serialisation, loss agreement against an independent computation, numerical gradients, checkpoint round-trip, resume continuity and greedy decoding."
+          actions={
+            <Button variant="outline" size="sm" onClick={runVerification} disabled={Boolean(alpha.busy)}>
+              <ShieldCheck className="mr-2 size-3.5" />
+              Run verification
+            </Button>
+          }
+        >
+          {verification ? (
+            <div className="space-y-4">
+              <StatGrid>
+                <Stat
+                  label="Result"
+                  value={verification.passed ? "PASS" : "FAIL"}
+                  hint={`${verification.checks.filter((check) => check.passed).length} of ${verification.checks.length} checks`}
+                />
+                <Stat label="Steps in run" value={verification.training.steps} hint={`seed ${verification.training.seed}`} />
+                <Stat
+                  label="Loss"
+                  value={`${loss(verification.training.firstLoss)} → ${loss(verification.training.lastLoss)}`}
+                  hint={`validation ${loss(verification.training.validationLoss)}`}
+                />
+                <Stat
+                  label="Uniform baseline"
+                  value={verification.training.uniformLoss.toFixed(4)}
+                  hint="the loss to beat"
+                />
+              </StatGrid>
+              <ul className="space-y-2">
+                {verification.checks.map((check) => (
+                  <li key={check.id} className="flex items-start gap-3 border-b border-border/60 pb-2 last:border-b-0">
+                    <Pill className={check.passed ? "" : "border-destructive/50 text-destructive"}>{check.id}</Pill>
+                    <div className="space-y-0.5">
+                      <p className="text-xs text-foreground">{check.label}</p>
+                      <p className="text-[11px] leading-4 text-muted-foreground">{check.detail}</p>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <p className="text-[11px] leading-4 text-muted-foreground">
+                Verification trains its own weights from the configured seed; the model this session is holding is never touched by
+                it, so a passing report does not claim the live weights were verified.
+              </p>
+            </div>
+          ) : (
+            <EmptyNote>
+              Verification has not run in this session. Running it takes a few seconds and reports every check, including the ones it
+              fails.
+            </EmptyNote>
+          )}
+        </Frame>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Frame
           title="Tokenizer"
           status={snapshot?.statuses.tokenizer}
           lede="Alpha's own BPE vocabulary, trained from the corpus in the browser and stored with its merge table."
@@ -298,8 +460,12 @@ export function TrainingPanel({ alpha }: { alpha: AlphaRuntime }) {
       </div>
 
       {snapshot?.corpus ? (
-        <Frame title="Dataset" status="ready" lede="What Alpha is trained on, with its licence recorded next to it.">
-          <div className="grid gap-6 md:grid-cols-2">
+        <Frame
+          title="Dataset"
+          status="ready"
+          lede="What Alpha is trained on, with its licence recorded next to it — and what the trainer will actually consume, measured from the corpus rather than estimated."
+        >
+          <div className="grid gap-6 md:grid-cols-3">
             <div>
               <Eyebrow>Corpus</Eyebrow>
               <div className="mt-2">
@@ -308,6 +474,7 @@ export function TrainingPanel({ alpha }: { alpha: AlphaRuntime }) {
                 <KeyValue label="licence">{snapshot.corpus.license}</KeyValue>
                 <KeyValue label="documents">{snapshot.corpus.documents}</KeyValue>
                 <KeyValue label="characters">{snapshot.corpus.characters.toLocaleString()}</KeyValue>
+                {corpus ? <KeyValue label="fingerprint">{corpus.fingerprint}</KeyValue> : null}
               </div>
             </div>
             <div>
@@ -315,10 +482,53 @@ export function TrainingPanel({ alpha }: { alpha: AlphaRuntime }) {
               <div className="mt-2">
                 <KeyValue label="train tokens">{snapshot.corpus.trainTokens.toLocaleString()}</KeyValue>
                 <KeyValue label="validation tokens">{snapshot.corpus.validationTokens.toLocaleString()}</KeyValue>
-                <KeyValue label="objective">next-token cross-entropy</KeyValue>
-                <KeyValue label="optimiser">AdamW (decoupled weight decay)</KeyValue>
+                <KeyValue label="train examples">{corpus ? corpus.trainExamples.toLocaleString() : "—"}</KeyValue>
+                <KeyValue label="validation examples">{corpus ? corpus.validationExamples.toLocaleString() : "—"}</KeyValue>
+                <KeyValue label="unknown tokens">{corpus ? corpus.unknownTokens.toLocaleString() : "—"}</KeyValue>
               </div>
             </div>
+            <div>
+              <Eyebrow>Engine</Eyebrow>
+              <div className="mt-2">
+                <KeyValue label="objective">next-token cross-entropy</KeyValue>
+                <KeyValue label="optimiser">AdamW (decoupled weight decay)</KeyValue>
+                <KeyValue label="sequence length">{corpus ? corpus.sequenceLength : snapshot.model.config.contextLength}</KeyValue>
+                <KeyValue label="batch size">{corpus ? corpus.batchSize : "—"}</KeyValue>
+                <KeyValue label="padding">
+                  {corpus ? (corpus.padded ? `${corpus.paddingTokensPerBatch ?? 0} tokens/batch` : "none — random windows") : "—"}
+                </KeyValue>
+              </div>
+            </div>
+          </div>
+          {corpus && corpus.unknownTokens > 0 ? (
+            <p className="mt-4 text-[11px] leading-4 text-muted-foreground">
+              {corpus.unknownTokens.toLocaleString()} tokens fell outside the trained alphabet and are recorded as <Mono>{"<unk>"}</Mono>
+              . They are counted here rather than dropped quietly.
+            </p>
+          ) : null}
+        </Frame>
+      ) : null}
+
+      {resources ? (
+        <Frame
+          title="Resource envelope"
+          status="ready"
+          lede="Alpha's hard ceilings and the memory a run of the current shape needs. Nothing here is a hosted model budget: it is what this tab allocates."
+        >
+          <div className="grid gap-6 md:grid-cols-4">
+            <Stat label="Parameters" value={resources.estimate.parameterCount.toLocaleString()} hint="from the config, not a pretrained file" />
+            <Stat label="Weights" value={formatBytes(resources.estimate.weightsBytes)} hint="float32" />
+            <Stat label="Optimiser" value={formatBytes(resources.estimate.optimizerBytes)} hint="AdamW moments" />
+            <Stat label="Estimated peak" value={formatBytes(resources.estimate.totalBytes)} hint="weights + gradients + moments + one batch of activations" />
+          </div>
+          <p className="mt-4 text-[11px] leading-4 text-muted-foreground">{resources.estimate.note}</p>
+          <div className="mt-4 grid gap-x-6 gap-y-3 md:grid-cols-3">
+            <KeyValue label="max sequence">{resources.limits.maxSeqLen}</KeyValue>
+            <KeyValue label="max batch">{resources.limits.maxBatchSize}</KeyValue>
+            <KeyValue label="max parameters">{resources.limits.maxParameterCount.toLocaleString()}</KeyValue>
+            <KeyValue label="max documents">{resources.limits.maxDocuments.toLocaleString()}</KeyValue>
+            <KeyValue label="max document characters">{resources.limits.maxDocumentCharacters.toLocaleString()}</KeyValue>
+            <KeyValue label="max new tokens">{resources.limits.maxNewTokens}</KeyValue>
           </div>
         </Frame>
       ) : null}

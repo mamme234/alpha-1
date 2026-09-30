@@ -9,9 +9,22 @@
  */
 
 import { AlphaValidationError } from "../core/errors";
+import { ALPHA_RESOURCE_LIMITS, assertResourceLimit, countParametersFromConfig } from "../core/limits";
 import type { AlphaModelStage } from "../core/types";
 
 export type PositionalEncodingKind = "learned" | "sinusoidal";
+
+/**
+ * Special-token ids as the *model* records them. The tokenizer owns the
+ * vocabulary; the model config records the ids it was built against so a
+ * checkpoint can prove it is being reloaded with the same vocabulary.
+ */
+export type AlphaSpecialTokenIds = {
+  pad: number;
+  unk: number;
+  bos: number;
+  eos: number;
+};
 
 export type AlphaModelConfig = {
   /** Human name, e.g. "alpha-nano". */
@@ -31,6 +44,12 @@ export type AlphaModelConfig = {
   tieEmbeddings: boolean;
   /** Std-dev of the normal distribution used for weight initialisation. */
   initStd: number;
+  /**
+   * Special-token ids this architecture was built against. Optional because a
+   * bare architecture can be declared before a vocabulary exists; it is filled
+   * in as soon as a tokenizer is trained, and every checkpoint records it.
+   */
+  specialTokenIds?: AlphaSpecialTokenIds;
 };
 
 export type AlphaModelPreset = "nano" | "micro" | "small";
@@ -96,6 +115,19 @@ export function createModelConfig(
 }
 
 export function validateModelConfig(config: AlphaModelConfig): void {
+  assertResourceLimit("maxContextLength", config.contextLength, "model config");
+  assertResourceLimit("maxVocabSize", config.vocabSize, "model config");
+  assertResourceLimit("maxLayers", config.nLayers, "model config");
+  assertResourceLimit("maxDModel", config.dModel, "model config");
+  if (config.nHeads < 1) {
+    throw new AlphaValidationError("model", "nHeads must be at least 1");
+  }
+  if (config.dropout > ALPHA_RESOURCE_LIMITS.maxDropout) {
+    throw new AlphaValidationError(
+      "model",
+      `dropout ${config.dropout} is above Alpha's limit of ${ALPHA_RESOURCE_LIMITS.maxDropout}`,
+    );
+  }
   if (config.dModel % config.nHeads !== 0) {
     throw new AlphaValidationError(
       "model",
@@ -120,24 +152,74 @@ export function validateModelConfig(config: AlphaModelConfig): void {
   if (config.dropout < 0 || config.dropout >= 1) {
     throw new AlphaValidationError("model", "dropout must be in [0, 1)");
   }
+  const parameters = countParametersFromConfig(config);
+  if (parameters > ALPHA_RESOURCE_LIMITS.maxParameterCount) {
+    throw new AlphaValidationError(
+      "model",
+      `architecture has ${parameters.toLocaleString()} parameters, above Alpha's CPU-trains limit of ${ALPHA_RESOURCE_LIMITS.maxParameterCount.toLocaleString()}`,
+      { parameterCount: parameters, limit: ALPHA_RESOURCE_LIMITS.maxParameterCount },
+    );
+  }
+  if (config.specialTokenIds) {
+    const ids = config.specialTokenIds;
+    for (const [name, id] of Object.entries(ids)) {
+      if (!Number.isInteger(id) || id < 0 || id >= config.vocabSize) {
+        throw new AlphaValidationError(
+          "model",
+          `special token ${name} id ${id} is outside the vocabulary (0..${config.vocabSize - 1})`,
+        );
+      }
+    }
+    const distinct = new Set([ids.pad, ids.unk, ids.bos, ids.eos]);
+    if (distinct.size !== 4) {
+      throw new AlphaValidationError("model", "special token ids must all be different");
+    }
+  }
+}
+
+/**
+ * Stable fingerprint of an architecture. Checkpoints record it so reloading
+ * weights into a differently-shaped model fails loudly instead of producing
+ * meaningless numbers.
+ */
+export function modelConfigFingerprint(config: AlphaModelConfig): string {
+  const canonical = JSON.stringify({
+    name: config.name,
+    version: config.version,
+    vocabSize: config.vocabSize,
+    contextLength: config.contextLength,
+    dModel: config.dModel,
+    nHeads: config.nHeads,
+    nLayers: config.nLayers,
+    dFeedForward: config.dFeedForward,
+    dropout: config.dropout,
+    normEps: config.normEps,
+    positionalEncoding: config.positionalEncoding,
+    tieEmbeddings: config.tieEmbeddings,
+    initStd: config.initStd,
+    specialTokenIds: config.specialTokenIds ?? null,
+  });
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < canonical.length; i++) {
+    hash ^= canonical.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `cfg_${hash.toString(16).padStart(8, "0")}`;
+}
+
+/** Bind a trained tokenizer's special-token ids onto an architecture. */
+export function withSpecialTokenIds(
+  config: AlphaModelConfig,
+  ids: AlphaSpecialTokenIds,
+): AlphaModelConfig {
+  const next = { ...config, specialTokenIds: ids };
+  validateModelConfig(next);
+  return next;
 }
 
 /** Exact parameter count for an architecture — computed, never guessed. */
 export function countParameters(config: AlphaModelConfig): number {
-  const c = config.dModel;
-  let total = config.vocabSize * c; // token embedding
-  if (config.positionalEncoding === "learned") total += config.contextLength * c;
-  const perLayer =
-    4 * c * c + // attention projections
-    4 * c + // attention biases
-    2 * c * config.dFeedForward + // mlp up/down
-    config.dFeedForward + // mlp bias 1
-    c + // mlp bias 2
-    4 * c; // two layer norms
-  total += perLayer * config.nLayers;
-  total += 2 * c; // final layer norm
-  if (!config.tieEmbeddings) total += config.vocabSize * c + config.vocabSize; // output projection
-  return total;
+  return countParametersFromConfig(config);
 }
 
 export type ArchitectureTensorRow = { name: string; shape: string; parameters: number };

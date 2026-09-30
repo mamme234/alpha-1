@@ -9,6 +9,8 @@
 
 import type { AlphaPersistenceAdapter, PersistedRunInput } from "@/alpha";
 import type { AlphaCheckpoint } from "@/alpha";
+import type { AlphaTrainingJob } from "@/alpha";
+import { checkpointToJson } from "@/alpha";
 import type { AlphaModelArtifact } from "@/alpha";
 import type { AlphaTokenizerSnapshot } from "@/alpha";
 import type { AuditRecord } from "@/alpha";
@@ -58,6 +60,43 @@ type Mutations = {
     optimizer: string;
     rng: unknown;
     config: unknown;
+    runId?: string;
+    seed?: number;
+    datasetVersion?: string;
+    tokenizerFingerprint?: string;
+    formatVersion?: string;
+    checkpoint?: string;
+  }) => Promise<unknown>;
+  saveTrainingJob: (args: {
+    jobId: string;
+    state: string;
+    modelName: string;
+    modelVersion: string;
+    tokenizerVersion: string;
+    tokenizerFingerprint: string;
+    datasetName: string;
+    datasetVersion: string;
+    datasetFingerprint: string;
+    datasetLicense: string;
+    corpusTokens: number;
+    corpusDocuments: number;
+    config: unknown;
+    seed: number;
+    step: number;
+    totalSteps: number;
+    epochs?: number;
+    tokensSeen: number;
+    trainLoss?: number;
+    bestLoss?: number;
+    validationLoss?: number;
+    learningRate?: number;
+    checkpointIds: string[];
+    lastCheckpointId?: string;
+    resumedFromCheckpointId?: string;
+    resumes: number;
+    error?: string;
+    startedAt?: number;
+    completedAt?: number;
   }) => Promise<unknown>;
   saveVectors: (args: {
     collection: string;
@@ -163,6 +202,11 @@ type Mutations = {
   }) => Promise<unknown>;
 };
 
+/** Convex validators reject NaN/Infinity, so an unmeasured metric is omitted. */
+function finite(value: number | null): number | undefined {
+  return value !== null && Number.isFinite(value) ? value : undefined;
+}
+
 /** Best-effort: persistence problems must never break an Alpha run. */
 async function safe(action: () => Promise<unknown>): Promise<void> {
   try {
@@ -226,6 +270,49 @@ export function createConvexPersistence(mutations: Mutations): AlphaPersistenceA
           optimizer: JSON.stringify(checkpoint.optimizer),
           rng: checkpoint.rng,
           config: checkpoint.config,
+          runId: checkpoint.runId,
+          seed: checkpoint.seed,
+          datasetVersion: checkpoint.datasetVersion,
+          tokenizerFingerprint: checkpoint.tokenizer.fingerprint,
+          formatVersion: checkpoint.formatVersion,
+          // The whole document, so a resume restores the real artefact instead
+          // of a lookalike reassembled from columns.
+          checkpoint: checkpointToJson(checkpoint),
+        }),
+      ),
+
+    saveTrainingJob: (job: AlphaTrainingJob) =>
+      safe(() =>
+        mutations.saveTrainingJob({
+          jobId: job.id,
+          state: job.state,
+          modelName: job.modelName,
+          modelVersion: job.modelVersion,
+          tokenizerVersion: job.tokenizerVersion,
+          tokenizerFingerprint: job.tokenizerFingerprint,
+          datasetName: job.datasetName,
+          datasetVersion: job.datasetVersion,
+          datasetFingerprint: job.datasetFingerprint,
+          datasetLicense: job.datasetLicense,
+          corpusTokens: job.corpusTokens,
+          corpusDocuments: job.corpusDocuments,
+          config: job.config,
+          seed: job.seed,
+          step: job.step,
+          totalSteps: job.totalSteps,
+          epochs: job.epochs ?? undefined,
+          tokensSeen: job.tokensSeen,
+          trainLoss: finite(job.trainLoss),
+          bestLoss: finite(job.bestLoss),
+          validationLoss: finite(job.validationLoss),
+          learningRate: finite(job.learningRate),
+          checkpointIds: job.checkpointIds,
+          lastCheckpointId: job.lastCheckpointId ?? undefined,
+          resumedFromCheckpointId: job.resumedFromCheckpointId ?? undefined,
+          resumes: job.resumes,
+          error: job.error ?? undefined,
+          startedAt: job.startedAt ?? undefined,
+          completedAt: job.completedAt ?? undefined,
         }),
       ),
 

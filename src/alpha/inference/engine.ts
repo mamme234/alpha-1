@@ -7,24 +7,35 @@
  * That is deliberately impossible to miss — Alpha must never be presented as a
  * finished model because a caller forgot to check.
  *
+ * Decoding is explicit: temperature 0 (or `deterministic: true`) is greedy
+ * argmax, which is reproducible; any positive temperature samples from the
+ * truncated distribution using Alpha's own seeded generator, so the same seed
+ * reproduces the same tokens.
+ *
  * Note on performance: generation re-runs the full prefix each step (no KV
  * cache yet). KV caching is listed as in-development in the architecture docs.
  */
 
 import { AlphaRng } from "../core/rng";
 import { AlphaValidationError } from "../core/errors";
+import { assertResourceLimit } from "../core/limits";
 import { setGradEnabled } from "../core/tensor";
 import type { AlphaModelStage } from "../core/types";
 import type { AlphaTransformer } from "../model/transformer";
 import type { AlphaTokenizer } from "../tokenizer/bpe";
 
 export type SamplingConfig = {
+  /** 0 means greedy (argmax) decoding — fully deterministic. */
   temperature: number;
   topK: number;
   topP: number;
   maxNewTokens: number;
   repetitionPenalty: number;
   stopSequences: string[];
+  /** Token ids that end generation when they are produced. */
+  stopTokenIds: number[];
+  /** Force greedy decoding regardless of temperature. */
+  deterministic: boolean;
   seed: number;
 };
 
@@ -35,13 +46,29 @@ export const DEFAULT_SAMPLING: SamplingConfig = {
   maxNewTokens: 64,
   repetitionPenalty: 1.1,
   stopSequences: [],
+  stopTokenIds: [],
+  deterministic: false,
   seed: 2026,
 };
 
-export type StopReason = "eos" | "stop-sequence" | "max-tokens" | "context-limit";
+/** Named presets so a caller does not have to rediscover sensible settings. */
+export const SAMPLING_PRESETS: Record<"greedy" | "balanced" | "creative", SamplingConfig> = {
+  greedy: { ...DEFAULT_SAMPLING, temperature: 0, topK: 0, topP: 1, repetitionPenalty: 1, deterministic: true },
+  balanced: { ...DEFAULT_SAMPLING },
+  creative: { ...DEFAULT_SAMPLING, temperature: 1.1, topK: 80, topP: 0.98, repetitionPenalty: 1.15 },
+};
+
+export type StopReason =
+  | "eos"
+  | "stop-token"
+  | "stop-sequence"
+  | "max-tokens"
+  | "context-limit";
 
 export type GenerationResult = {
   text: string;
+  /** Token ids the model actually produced, in order. */
+  tokenIds: number[];
   promptTokens: number;
   generatedTokens: number;
   stopReason: StopReason;
@@ -53,11 +80,16 @@ export type GenerationResult = {
   warning: string | null;
   /** Per-token negative log-likelihood of what was actually generated. */
   tokenLogProbs: number[];
+  /** Mean negative log-likelihood over the generated tokens. */
+  meanNll: number;
   sampling: SamplingConfig;
+  /** How the model produced the first token: "greedy" or "sampled". */
+  decoding: "greedy" | "sampled";
 };
 
 export type GenerationStreamChunk = {
   token: string;
+  tokenId: number;
   text: string;
   index: number;
   done: boolean;
@@ -72,7 +104,7 @@ export type InferenceEngineOptions = {
   maxContextTokens?: number;
 };
 
-function untrainedWarning(stage: AlphaModelStage): string | null {
+export function untrainedWarning(stage: AlphaModelStage): string | null {
   switch (stage) {
     case "untrained":
     case "architecture":
@@ -85,6 +117,17 @@ function untrainedWarning(stage: AlphaModelStage): string | null {
       return null;
   }
 }
+
+/** Mutable state carried through one generation loop. */
+type DecodeState = {
+  config: SamplingConfig;
+  context: number[];
+  generated: number[];
+  tokenLogProbs: number[];
+  promptTokens: number;
+  stopReason: StopReason;
+  text: string;
+};
 
 export class AlphaInferenceEngine {
   readonly model: AlphaTransformer;
@@ -102,20 +145,48 @@ export class AlphaInferenceEngine {
     );
   }
 
-  private resolveSampling(partial: Partial<SamplingConfig> = {}): SamplingConfig {
+  /** Validate and merge a partial sampling configuration against the defaults. */
+  resolveSampling(partial: Partial<SamplingConfig> = {}): SamplingConfig {
     const config = { ...DEFAULT_SAMPLING, ...partial };
-    if (config.temperature < 0) {
-      throw new AlphaValidationError("inference", "temperature must be >= 0");
+    if (!Number.isFinite(config.temperature) || config.temperature < 0) {
+      throw new AlphaValidationError("inference", "temperature must be 0 or a positive number");
     }
-    if (config.topP <= 0 || config.topP > 1) {
+    if (config.temperature > 4) {
+      throw new AlphaValidationError("inference", "temperature above 4 would produce noise, not language");
+    }
+    if (!(config.topP > 0) || config.topP > 1) {
       throw new AlphaValidationError("inference", "topP must be in (0, 1]");
+    }
+    if (!Number.isInteger(config.topK) || config.topK < 0) {
+      throw new AlphaValidationError("inference", "topK must be 0 (disabled) or a positive integer");
+    }
+    if (!Number.isInteger(config.maxNewTokens) || config.maxNewTokens < 1) {
+      throw new AlphaValidationError("inference", "maxNewTokens must be a positive integer");
+    }
+    assertResourceLimit("maxNewTokens", config.maxNewTokens, "inference");
+    if (config.repetitionPenalty < 0) {
+      throw new AlphaValidationError("inference", "repetitionPenalty must be >= 0");
+    }
+    if (!Number.isFinite(config.seed)) {
+      throw new AlphaValidationError("inference", "seed must be a finite number");
+    }
+    if (config.stopSequences.some((sequence) => typeof sequence !== "string")) {
+      throw new AlphaValidationError("inference", "stopSequences must be strings");
+    }
+    if (config.stopTokenIds.some((id) => !Number.isInteger(id) || id < 0)) {
+      throw new AlphaValidationError("inference", "stopTokenIds must be non-negative integers");
+    }
+    // The completion cannot be longer than the window it starts in.
+    const room = Math.max(1, this.maxContextTokens - 1);
+    if (config.maxNewTokens > room) {
+      config.maxNewTokens = room;
     }
     return config;
   }
 
   /**
    * Turn one row of logits into a token id.
-   * temperature -> repetition penalty -> top-k -> top-p -> sample.
+   * temperature -> repetition penalty -> top-k -> top-p -> argmax or sample.
    */
   private sampleNextToken(
     logits: Float32Array,
@@ -130,7 +201,8 @@ export class AlphaInferenceEngine {
     if (config.repetitionPenalty > 0 && config.repetitionPenalty !== 1) {
       for (const id of generated) {
         if (id < 0 || id >= vocab) continue;
-        scores[id] = scores[id] > 0 ? scores[id] / config.repetitionPenalty : scores[id] * config.repetitionPenalty;
+        scores[id] =
+          scores[id] > 0 ? scores[id] / config.repetitionPenalty : scores[id] * config.repetitionPenalty;
       }
     }
 
@@ -138,7 +210,8 @@ export class AlphaInferenceEngine {
     const banned = new Set<number>([this.tokenizer.padId]);
     for (const id of banned) if (id >= 0 && id < vocab) scores[id] = -Infinity;
 
-    const temperature = config.temperature > 0 ? config.temperature : 1;
+    const deterministic = config.deterministic || config.temperature <= 0;
+    const temperature = deterministic ? 1 : config.temperature;
     const indices = Array.from({ length: vocab }, (_, i) => i);
 
     // Softmax with temperature.
@@ -175,6 +248,13 @@ export class AlphaInferenceEngine {
       candidates = kept;
     }
 
+    if (deterministic) {
+      let best = candidates[0] ?? 0;
+      for (const id of candidates) if (probs[id] > probs[best]) best = id;
+      return { id: best, logProb: Math.log(probs[best] + 1e-12) };
+    }
+
+    // Renormalise over the surviving candidates and sample with Alpha's own RNG.
     let mass = 0;
     for (const id of candidates) mass += probs[id];
     if (mass <= 0) {
@@ -194,43 +274,91 @@ export class AlphaInferenceEngine {
     return { id: chosen, logProb: Math.log(probs[chosen] + 1e-12) };
   }
 
+  /** Encode a prompt into the window, reporting what actually fit. */
+  private encodePrompt(prompt: string): { ids: number[]; truncated: boolean } {
+    if (typeof prompt !== "string") {
+      throw new AlphaValidationError("inference", "prompt must be a string");
+    }
+    assertResourceLimit("maxPromptTokens", prompt.length, "inference prompt");
+    const encoded = this.tokenizer.encodeDetailed(prompt, {
+      maxLength: Math.max(1, this.maxContextTokens - 1),
+      truncation: "left",
+      addBos: true,
+    });
+    return { ids: [...encoded.ids], truncated: encoded.truncated };
+  }
+
+  private decodeLoopState(config: SamplingConfig, promptIds: number[]): DecodeState {
+    return {
+      config,
+      context: [...promptIds],
+      generated: [],
+      tokenLogProbs: [],
+      promptTokens: promptIds.length,
+      stopReason: "max-tokens",
+      text: "",
+    };
+  }
+
+  private finish(state: DecodeState, startedAt: number): GenerationResult {
+    const latencyMs = Date.now() - startedAt;
+    const meanNll =
+      state.tokenLogProbs.length === 0
+        ? 0
+        : -state.tokenLogProbs.reduce((sum, value) => sum + value, 0) / state.tokenLogProbs.length;
+    const deterministic = state.config.deterministic || state.config.temperature <= 0;
+    return {
+      text: state.text,
+      tokenIds: [...state.generated],
+      promptTokens: state.promptTokens,
+      generatedTokens: state.generated.length,
+      stopReason: state.stopReason,
+      latencyMs,
+      tokensPerSecond:
+        latencyMs > 0 ? Number(((state.generated.length / latencyMs) * 1000).toFixed(2)) : 0,
+      modelStage: this.stage,
+      modelName: this.model.config.name,
+      warning: untrainedWarning(this.stage),
+      tokenLogProbs: state.tokenLogProbs,
+      meanNll,
+      sampling: state.config,
+      decoding: deterministic ? "greedy" : "sampled",
+    };
+  }
+
   /** Full generation, no streaming. */
   generate(prompt: string, sampling: Partial<SamplingConfig> = {}): GenerationResult {
     const config = this.resolveSampling(sampling);
     const started = Date.now();
     const rng = new AlphaRng(config.seed);
-    const promptEncoding = this.tokenizer.encodeDetailed(prompt, {
-      maxLength: Math.max(1, this.maxContextTokens - 1),
-      truncation: "left",
-      addBos: true,
-    });
-    const context = [...promptEncoding.ids];
-    const generated: number[] = [];
-    const tokenLogProbs: number[] = [];
-    let stopReason: StopReason = "max-tokens";
-    let text = "";
+    const encoded = this.encodePrompt(prompt);
+    const state = this.decodeLoopState(config, encoded.ids);
 
     setGradEnabled(false);
     try {
-      while (generated.length < config.maxNewTokens) {
-        if (context.length >= this.maxContextTokens) {
-          stopReason = "context-limit";
+      while (state.generated.length < config.maxNewTokens) {
+        if (state.context.length >= this.maxContextTokens) {
+          state.stopReason = "context-limit";
           break;
         }
-        const logits = this.forwardLastRow(context);
-        const { id, logProb } = this.sampleNextToken(logits, generated, config, rng);
+        const logits = this.forwardLastRow(state.context);
+        const { id, logProb } = this.sampleNextToken(logits, state.generated, config, rng);
         if (id === this.tokenizer.eosId) {
-          stopReason = "eos";
+          state.stopReason = "eos";
           break;
         }
-        generated.push(id);
-        tokenLogProbs.push(logProb);
-        context.push(id);
-        text = this.tokenizer.decode(generated);
-        const matched = config.stopSequences.find((seq) => seq.length > 0 && text.endsWith(seq));
+        if (config.stopTokenIds.includes(id)) {
+          state.stopReason = "stop-token";
+          break;
+        }
+        state.generated.push(id);
+        state.tokenLogProbs.push(logProb);
+        state.context.push(id);
+        state.text = this.tokenizer.decode(state.generated);
+        const matched = config.stopSequences.find((seq) => seq.length > 0 && state.text.endsWith(seq));
         if (matched) {
-          text = text.slice(0, text.length - matched.length);
-          stopReason = "stop-sequence";
+          state.text = state.text.slice(0, state.text.length - matched.length);
+          state.stopReason = "stop-sequence";
           break;
         }
       }
@@ -238,21 +366,7 @@ export class AlphaInferenceEngine {
       setGradEnabled(true);
     }
 
-    const latencyMs = Date.now() - started;
-    return {
-      text,
-      promptTokens: context.length - generated.length,
-      generatedTokens: generated.length,
-      stopReason,
-      latencyMs,
-      tokensPerSecond:
-        latencyMs > 0 ? Number(((generated.length / latencyMs) * 1000).toFixed(2)) : 0,
-      modelStage: this.stage,
-      modelName: this.model.config.name,
-      warning: untrainedWarning(this.stage),
-      tokenLogProbs,
-      sampling: config,
-    };
+    return this.finish(state, started);
   }
 
   /** Incremental generation for a chat-style UI. */
@@ -263,71 +377,47 @@ export class AlphaInferenceEngine {
     const config = this.resolveSampling(sampling);
     const started = Date.now();
     const rng = new AlphaRng(config.seed);
-    const promptEncoding = this.tokenizer.encodeDetailed(prompt, {
-      maxLength: Math.max(1, this.maxContextTokens - 1),
-      truncation: "left",
-      addBos: true,
-    });
-    const context = [...promptEncoding.ids];
-    const generated: number[] = [];
-    const tokenLogProbs: number[] = [];
-    let stopReason: StopReason = "max-tokens";
-    let text = "";
+    const encoded = this.encodePrompt(prompt);
+    const state = this.decodeLoopState(config, encoded.ids);
 
     setGradEnabled(false);
     try {
       let index = 0;
-      while (generated.length < config.maxNewTokens) {
-        if (context.length >= this.maxContextTokens) {
-          stopReason = "context-limit";
+      while (state.generated.length < config.maxNewTokens) {
+        if (state.context.length >= this.maxContextTokens) {
+          state.stopReason = "context-limit";
           break;
         }
-        const logits = this.forwardLastRow(context);
-        const { id, logProb } = this.sampleNextToken(logits, generated, config, rng);
+        const logits = this.forwardLastRow(state.context);
+        const { id, logProb } = this.sampleNextToken(logits, state.generated, config, rng);
         if (id === this.tokenizer.eosId) {
-          stopReason = "eos";
+          state.stopReason = "eos";
           break;
         }
-        generated.push(id);
-        tokenLogProbs.push(logProb);
-        context.push(id);
-        text = this.tokenizer.decode(generated);
-        const matched = config.stopSequences.find((seq) => seq.length > 0 && text.endsWith(seq));
+        if (config.stopTokenIds.includes(id)) {
+          state.stopReason = "stop-token";
+          break;
+        }
+        state.generated.push(id);
+        state.tokenLogProbs.push(logProb);
+        state.context.push(id);
+        state.text = this.tokenizer.decode(state.generated);
+        const matched = config.stopSequences.find((seq) => seq.length > 0 && state.text.endsWith(seq));
         const tokenText = this.tokenizer.decode([id]);
         if (matched) {
-          stopReason = "stop-sequence";
-          const trimmed = text.slice(0, text.length - matched.length);
-          yield {
-            token: tokenText,
-            text: trimmed,
-            index: index++,
-            done: true,
-            stopReason,
-          };
-          text = trimmed;
+          state.stopReason = "stop-sequence";
+          const trimmed = state.text.slice(0, state.text.length - matched.length);
+          state.text = trimmed;
+          yield { token: tokenText, tokenId: id, text: trimmed, index: index++, done: true, stopReason: state.stopReason };
           break;
         }
-        yield { token: tokenText, text, index: index++, done: false };
+        yield { token: tokenText, tokenId: id, text: state.text, index: index++, done: false };
       }
     } finally {
       setGradEnabled(true);
     }
 
-    const latencyMs = Date.now() - started;
-    return {
-      text,
-      promptTokens: context.length - generated.length,
-      generatedTokens: generated.length,
-      stopReason,
-      latencyMs,
-      tokensPerSecond:
-        latencyMs > 0 ? Number(((generated.length / latencyMs) * 1000).toFixed(2)) : 0,
-      modelStage: this.stage,
-      modelName: this.model.config.name,
-      warning: untrainedWarning(this.stage),
-      tokenLogProbs,
-      sampling: config,
-    };
+    return this.finish(state, started);
   }
 
   /** Next-token scores for a prompt — used by diagnostics in the workspace. */

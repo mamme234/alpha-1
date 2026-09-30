@@ -164,6 +164,54 @@ export class AlphaTokenizer {
     return this.idFor(this.specialTokens.pad);
   }
 
+  get unkId(): number {
+    return this.idFor(this.specialTokens.unk);
+  }
+
+  /** True when the exact token string is in the vocabulary. */
+  hasToken(token: string): boolean {
+    return this.tokenToId.has(token);
+  }
+
+  /**
+   * Stable fingerprint of the vocabulary, merge table and special tokens.
+   * Checkpoints record it, so loading weights against a different vocabulary
+   * is detected instead of silently mismatched.
+   */
+  fingerprint(): string {
+    let hash = 0x811c9dc5;
+    const feed = (text: string) => {
+      for (let i = 0; i < text.length; i++) {
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+      }
+    };
+    feed(this.version);
+    feed("|");
+    for (const token of this.tokens) {
+      feed(token);
+      feed("\u0001");
+    }
+    feed("|");
+    for (const [left, right] of this.merges) {
+      feed(left);
+      feed("\u0000");
+      feed(right);
+      feed("\u0001");
+    }
+    return `tok_${hash.toString(16).padStart(8, "0")}`;
+  }
+
+  /** The special-token ids a model config can record. */
+  get specialTokenIds(): { pad: number; unk: number; bos: number; eos: number } {
+    return {
+      pad: this.padId,
+      unk: this.unkId,
+      bos: this.bosId,
+      eos: this.eosId,
+    };
+  }
+
   get bosId(): number {
     return this.idFor(this.specialTokens.bos);
   }

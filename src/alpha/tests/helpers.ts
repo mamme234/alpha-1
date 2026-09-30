@@ -46,6 +46,15 @@ export function buildModel(tokenizer: AlphaTokenizer): AlphaTransformer {
   return new AlphaTransformer({ ...SMALL_MODEL, vocabSize: tokenizer.vocabSize });
 }
 
+/**
+ * The smallest complete model + tokenizer pair, for tests that train for real
+ * (checkpoints, gradients, lifecycle) without slowing the suite down.
+ */
+export function gradientCheckFixture(): { tokenizer: AlphaTokenizer; model: AlphaTransformer } {
+  const tokenizer = buildTokenizer();
+  return { tokenizer, model: buildModel(tokenizer) };
+}
+
 export type TestStack = {
   tokenizer: AlphaTokenizer;
   model: AlphaTransformer;

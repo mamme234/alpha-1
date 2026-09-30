@@ -9,8 +9,10 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyNote, Eyebrow, Frame, KeyValue, Mono, Pill, Stat, StatGrid, WarningNote } from "@/components/alpha/studio";
+import { SAMPLING_PRESETS, untrainedWarning } from "@/alpha";
 import type { AlphaRuntime } from "@/hooks/use-alpha";
 import { useState } from "react";
 import { Loader2, Sparkles, SquareStack } from "lucide-react";
@@ -35,13 +37,48 @@ export function InferencePanel({ alpha }: { alpha: AlphaRuntime }) {
   const [topK, setTopK] = useState(40);
   const [topP, setTopP] = useState(0.95);
   const [maxNewTokens, setMaxNewTokens] = useState(40);
+  const [repetitionPenalty, setRepetitionPenalty] = useState(1.1);
   const [seed, setSeed] = useState(2026);
+  const [deterministic, setDeterministic] = useState(false);
+  const [stopSequences, setStopSequences] = useState("");
+  const [stopTokenIds, setStopTokenIds] = useState("");
   const [mode, setMode] = useState<"generate" | "rag">("generate");
 
-  const sampling = { temperature, topK, topP, maxNewTokens, seed };
+  // Inputs are free text so a typo cannot silently change what is sent: the
+  // list is parsed here and blanks are dropped, never replaced with defaults.
+  const parsedStopSequences = stopSequences
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  const parsedStopTokenIds = stopTokenIds
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isInteger(value) && value >= 0);
+
+  const sampling = {
+    temperature,
+    topK,
+    topP,
+    maxNewTokens,
+    repetitionPenalty,
+    seed,
+    deterministic,
+    stopSequences: parsedStopSequences,
+    stopTokenIds: parsedStopTokenIds,
+  };
   const streaming = alpha.streaming;
-  const untrained = snapshot?.model.stage === "untrained" || snapshot?.model.stage === "architecture";
+  const warning = snapshot ? untrainedWarning(snapshot.model.stage) : null;
   const assembled = snapshot?.context.last ?? null;
+  const last = alpha.turns[0] ?? null;
+
+  const applyPreset = (preset: keyof typeof SAMPLING_PRESETS) => {
+    const config = SAMPLING_PRESETS[preset];
+    setTemperature(config.temperature);
+    setTopK(config.topK);
+    setTopP(config.topP);
+    setRepetitionPenalty(config.repetitionPenalty);
+    setDeterministic(config.deterministic);
+  };
 
   const submit = async () => {
     if (!prompt.trim()) return;
@@ -71,11 +108,12 @@ export function InferencePanel({ alpha }: { alpha: AlphaRuntime }) {
           </div>
         }
       >
-        {untrained ? (
-          <WarningNote>
-            These weights are random initialisation, so the tokens below are sampled from an untrained transformer. That is
-            what it looks like before training — not a bug, and not a hidden model answering for Alpha.
-          </WarningNote>
+        {warning ? <WarningNote>{warning}</WarningNote> : null}
+        {snapshot && snapshot.model.stage !== "trained" ? (
+          <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+            Train Alpha from the Training tab to move this model past <Mono>UNTRAINED</Mono>. Nothing is downloaded: the only
+            weights that exist here are the ones this project produced.
+          </p>
         ) : null}
 
         <div className="mt-4 grid gap-6 lg:grid-cols-[1fr_300px]">
@@ -122,15 +160,19 @@ export function InferencePanel({ alpha }: { alpha: AlphaRuntime }) {
                   {streaming}
                   <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-foreground/60 align-middle" />
                 </pre>
-              ) : alpha.turns[0] ? (
+              ) : last ? (
                 <div className="mt-2 space-y-3">
-                  <pre className="whitespace-pre-wrap font-mono text-xs leading-5 text-foreground">
-                    {alpha.turns[0].answer || "(empty generation — the model produced only stop tokens)"}
-                  </pre>
-                  {alpha.turns[0].sources.length > 0 ? (
+                  {last.error ? (
+                    <WarningNote>This request failed: {last.error}</WarningNote>
+                  ) : (
+                    <pre className="whitespace-pre-wrap font-mono text-xs leading-5 text-foreground">
+                      {last.answer || "(empty generation — the model produced only stop tokens)"}
+                    </pre>
+                  )}
+                  {last.sources.length > 0 ? (
                     <div className="space-y-2 border-t border-border pt-3">
                       <Eyebrow>Cited sources</Eyebrow>
-                      {alpha.turns[0].sources.map((source) => (
+                      {last.sources.map((source) => (
                         <p key={source.chunkId} className="text-[11px] leading-4 text-muted-foreground">
                           <Mono>[{source.rank}]</Mono> {source.title} · score {source.score.toFixed(4)} ·{" "}
                           {source.excerpt.slice(0, 90)}…
@@ -138,18 +180,35 @@ export function InferencePanel({ alpha }: { alpha: AlphaRuntime }) {
                       ))}
                     </div>
                   ) : null}
-                  {alpha.turns[0].result ? (
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-border pt-3 text-[11px] text-muted-foreground">
-                      <span>{alpha.turns[0].result.generatedTokens} tokens generated</span>
-                      <span>{alpha.turns[0].result.promptTokens} prompt tokens</span>
-                      <span>{alpha.turns[0].result.latencyMs} ms</span>
-                      <span>{alpha.turns[0].result.tokensPerSecond} tok/s</span>
-                      <span>stop: {alpha.turns[0].result.stopReason}</span>
-                      <span>stage: {alpha.turns[0].result.modelStage}</span>
+                  {last.result ? (
+                    <div className="space-y-3 border-t border-border pt-3">
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                        <span>{last.result.generatedTokens} tokens generated</span>
+                        <span>{last.result.promptTokens} prompt tokens</span>
+                        <span>{last.result.latencyMs} ms</span>
+                        <span>{last.result.tokensPerSecond} tok/s</span>
+                        <span>stop: {last.result.stopReason}</span>
+                        <span>decoding: {last.result.decoding}</span>
+                        <span>stage: {last.result.modelStage}</span>
+                        <span>mean NLL: {last.result.meanNll.toFixed(4)}</span>
+                      </div>
+                      <div>
+                        <Eyebrow>Token ids</Eyebrow>
+                        <p className="mt-1 break-all font-mono text-[11px] leading-5 text-muted-foreground">
+                          [{last.result.tokenIds.join(", ")}]
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                        <span>request: {last.requestId}</span>
+                        <span>
+                          sampling: temp {last.result.sampling.temperature} · top-k {last.result.sampling.topK} · top-p{" "}
+                          {last.result.sampling.topP} · rep {last.result.sampling.repetitionPenalty}
+                        </span>
+                      </div>
                     </div>
                   ) : null}
-                  {alpha.turns[0].result?.warning ? (
-                    <p className="text-[11px] leading-4 text-muted-foreground">{alpha.turns[0].result.warning}</p>
+                  {last.result?.warning ? (
+                    <p className="text-[11px] leading-4 text-muted-foreground">{last.result.warning}</p>
                   ) : null}
                 </div>
               ) : (
@@ -161,6 +220,29 @@ export function InferencePanel({ alpha }: { alpha: AlphaRuntime }) {
           <div className="space-y-4">
             <div className="space-y-3 rounded-md border border-border p-4">
               <Eyebrow>Sampling</Eyebrow>
+              <div className="flex flex-wrap gap-1">
+                {(["greedy", "balanced", "creative"] as const).map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => applyPreset(preset)}
+                    className="rounded-sm border border-border px-2 py-[3px] text-[10px] uppercase tracking-[0.14em] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center justify-between gap-3 border-y border-border py-2">
+                <div>
+                  <Label htmlFor="deterministic" className="text-[11px] text-muted-foreground">
+                    Deterministic (greedy)
+                  </Label>
+                  <p className="text-[10px] leading-4 text-muted-foreground">
+                    Always takes the highest-probability token. Ignores temperature, top-k, top-p and the seed.
+                  </p>
+                </div>
+                <Switch id="deterministic" checked={deterministic} onCheckedChange={setDeterministic} />
+              </div>
               <div className="space-y-1">
                 <Label className="text-[11px] text-muted-foreground">Temperature · {temperature.toFixed(2)}</Label>
                 <Input
@@ -204,11 +286,41 @@ export function InferencePanel({ alpha }: { alpha: AlphaRuntime }) {
                 />
               </div>
               <div className="space-y-1">
+                <Label className="text-[11px] text-muted-foreground">Repetition penalty · {repetitionPenalty.toFixed(2)}</Label>
+                <Input
+                  type="number"
+                  step={0.05}
+                  min={1}
+                  max={2}
+                  value={repetitionPenalty}
+                  onChange={(event) => setRepetitionPenalty(Number(event.target.value))}
+                />
+              </div>
+              <div className="space-y-1">
                 <Label className="text-[11px] text-muted-foreground">Seed · {seed}</Label>
                 <Input type="number" value={seed} onChange={(event) => setSeed(Number(event.target.value))} />
               </div>
+              <div className="space-y-1">
+                <Label className="text-[11px] text-muted-foreground">Stop sequences</Label>
+                <Input
+                  value={stopSequences}
+                  onChange={(event) => setStopSequences(event.target.value)}
+                  placeholder="comma separated, e.g. \\n\\n,##"
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-[11px] text-muted-foreground">Stop token ids</Label>
+                <Input
+                  value={stopTokenIds}
+                  onChange={(event) => setStopTokenIds(event.target.value)}
+                  placeholder="comma separated, e.g. 3,7"
+                  className="font-mono text-xs"
+                />
+              </div>
               <p className="text-[11px] leading-4 text-muted-foreground">
-                The same seed reproduces the same sample: Alpha's sampler draws from its own deterministic generator.
+                The same seed reproduces the same sample: Alpha's sampler draws from its own deterministic generator. Empty stop
+                fields mean no stop condition beyond the model's end-of-sequence token, the token budget and the context window.
               </p>
             </div>
 

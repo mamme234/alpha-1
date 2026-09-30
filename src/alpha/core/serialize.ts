@@ -35,7 +35,13 @@ function base64Decode(encoded: string): string {
   return Buffer.from(encoded, "base64").toString("binary");
 }
 
-/** Rough byte size of a checkpoint payload, for reporting to the UI. */
+/**
+ * Exact byte length of a base64 payload. The trailing `=` characters are
+ * padding, not data, so a plain `length * 3 / 4` over-counts by one or two
+ * bytes whenever the payload is not a multiple of three — which is exactly the
+ * kind of off-by-two that would make a checkpoint look corrupt when it is not.
+ */
 export function base64ByteLength(encoded: string): number {
-  return Math.floor((encoded.length * 3) / 4);
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  return (encoded.length * 3) / 4 - padding;
 }

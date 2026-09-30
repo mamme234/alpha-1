@@ -104,6 +104,13 @@ export const saveCheckpoint = mutation({
     optimizer: v.string(),
     rng: v.any(),
     config: v.any(),
+    runId: v.optional(v.string()),
+    seed: v.optional(v.number()),
+    datasetVersion: v.optional(v.string()),
+    tokenizerFingerprint: v.optional(v.string()),
+    formatVersion: v.optional(v.string()),
+    /** The complete checkpoint document, so a resume restores the real thing. */
+    checkpoint: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const actorId = await requireActorId(ctx, args.sessionToken);
@@ -144,6 +151,8 @@ export const listCheckpoints = query({
         sizeBytes: row.sizeBytes,
         parameterCount: row.parameterCount,
         datasetName: row.datasetName,
+        runId: row.runId ?? null,
+        seed: row.seed ?? null,
         createdAt: row.createdAt,
       }));
   },
@@ -160,5 +169,118 @@ export const latestCheckpoint = query({
       .collect();
     if (rows.length === 0) return null;
     return rows.sort((a, b) => b.createdAt - a.createdAt)[0];
+  },
+});
+
+/**
+ * Training runs. One row per run, updated as it progresses, so the record of
+ * what was trained, on what data, and how far it got survives a reload — and a
+ * resumed run can point back at the checkpoint it continued from.
+ */
+export const saveTrainingJob = mutation({
+  args: {
+    sessionToken: v.string(),
+    jobId: v.string(),
+    state: v.string(),
+    modelName: v.string(),
+    modelVersion: v.string(),
+    tokenizerVersion: v.string(),
+    tokenizerFingerprint: v.string(),
+    datasetName: v.string(),
+    datasetVersion: v.string(),
+    datasetFingerprint: v.string(),
+    datasetLicense: v.string(),
+    corpusTokens: v.number(),
+    corpusDocuments: v.number(),
+    config: v.any(),
+    seed: v.number(),
+    step: v.number(),
+    totalSteps: v.number(),
+    epochs: v.optional(v.number()),
+    tokensSeen: v.number(),
+    trainLoss: v.optional(v.number()),
+    bestLoss: v.optional(v.number()),
+    validationLoss: v.optional(v.number()),
+    learningRate: v.optional(v.number()),
+    checkpointIds: v.array(v.string()),
+    lastCheckpointId: v.optional(v.string()),
+    resumedFromCheckpointId: v.optional(v.string()),
+    resumes: v.number(),
+    error: v.optional(v.string()),
+    startedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
+    const existing = await ctx.db
+      .query("alphaTrainingJobs")
+      .withIndex("by_job", (q) => q.eq("jobId", args.jobId))
+      .first();
+    const now = Date.now();
+    if (existing && existing.actorId === actorId) {
+      await ctx.db.patch(existing._id, { ...args, updatedAt: now });
+      return existing._id;
+    }
+    return await ctx.db.insert("alphaTrainingJobs", {
+      ...args,
+      actorId,
+      createdAt: now,
+      updatedAt: now,
+    });
+  },
+});
+
+/** Training runs for this account, newest first. */
+export const listTrainingJobs = query({
+  args: { sessionToken: v.string(), limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
+    const rows = await ctx.db
+      .query("alphaTrainingJobs")
+      .withIndex("by_actor", (q) => q.eq("actorId", actorId))
+      .collect();
+    return rows
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, args.limit ?? 20)
+      .map((row) => ({
+        jobId: row.jobId,
+        state: row.state,
+        modelName: row.modelName,
+        modelVersion: row.modelVersion,
+        tokenizerVersion: row.tokenizerVersion,
+        datasetName: row.datasetName,
+        datasetVersion: row.datasetVersion,
+        seed: row.seed,
+        step: row.step,
+        totalSteps: row.totalSteps,
+        epochs: row.epochs ?? null,
+        tokensSeen: row.tokensSeen,
+        trainLoss: row.trainLoss ?? null,
+        bestLoss: row.bestLoss ?? null,
+        validationLoss: row.validationLoss ?? null,
+        checkpointIds: row.checkpointIds,
+        lastCheckpointId: row.lastCheckpointId ?? null,
+        resumedFromCheckpointId: row.resumedFromCheckpointId ?? null,
+        resumes: row.resumes,
+        error: row.error ?? null,
+        startedAt: row.startedAt ?? null,
+        completedAt: row.completedAt ?? null,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      }));
+  },
+});
+
+/** The most recently updated run for this account. */
+export const latestTrainingJob = query({
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const actorId = await requireActorId(ctx, args.sessionToken);
+    const rows = await ctx.db
+      .query("alphaTrainingJobs")
+      .withIndex("by_actor", (q) => q.eq("actorId", actorId))
+      .collect();
+    if (rows.length === 0) return null;
+    return rows.sort((a, b) => b.updatedAt - a.updatedAt)[0];
   },
 });
