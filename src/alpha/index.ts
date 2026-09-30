@@ -254,14 +254,27 @@ export {
   DEFAULT_SAMPLING,
   SAMPLING_PRESETS,
   argmax,
+  createGenerationCancellation,
   meanNll,
   untrainedWarning,
+  type GenerationCancellation,
   type GenerationResult,
   type GenerationStreamChunk,
   type InferenceEngineOptions,
   type SamplingConfig,
   type StopReason,
 } from "./inference/engine";
+export {
+  createKvCache,
+  kvCacheDropOldest,
+  kvCacheHasRoom,
+  kvCacheOverflow,
+  kvCacheStats,
+  resetKvCache,
+  type KvCache,
+  type KvCacheStats,
+} from "./model/kv-cache";
+export { type CachedForwardOptions } from "./model/transformer";
 export {
   AlphaInferenceService,
   type AlphaModelDescriptor,
@@ -278,10 +291,14 @@ export {
   SIMILARITY_FUNCTIONS,
   centroid,
   cosineSimilarity,
+  createEmbeddingConfig,
+  describeEmbeddingConfigMismatch,
   dotProduct,
+  embeddingConfigsMatch,
   euclideanDistance,
   normalize,
   type AlphaEmbedderOptions,
+  type AlphaEmbeddingConfig,
   type EmbeddingRecord,
   type PoolingStrategy,
 } from "./embeddings/embedder";
@@ -327,8 +344,11 @@ export {
 // --- tools ------------------------------------------------------------------
 export {
   AlphaToolRegistry,
+  AlphaToolTimeoutError,
+  DEFAULT_TOOL_TIMEOUT_MS,
   describeTool,
   singleStringInput,
+  withToolTimeout,
   type AlphaToolDefinition,
   type ToolCharacteristics,
   type ToolContext,
@@ -362,22 +382,28 @@ export {
   type JsonRpcResponse,
 } from "./mcp/protocol";
 export {
+  DEFAULT_MCP_TIMEOUT_MS,
   HttpMcpClient,
   UnconfiguredMcpClient,
   convertJsonSchema,
+  normaliseMcpResult,
   registerMcpTools,
   type McpClient,
   type McpClientInfo,
+  type McpNormalisedResult,
 } from "./mcp/client";
 
 // --- agents -----------------------------------------------------------------
 export {
   AlphaAgentRuntime,
   buildToolArguments,
+  createAgentCancellation,
   runAgentTask,
+  type AgentCancellation,
   type AgentRunRequest,
   type AgentRuntimeOptions,
 } from "./agents/runtime";
+export { reconcileOutcome, verifyAgentOutcome, type VerifyAgentOutcomeInput } from "./agents/verify";
 export {
   buildPlannerPrompt,
   extractCapabilityPhrases,
@@ -387,6 +413,7 @@ export {
 } from "./agents/planner";
 export type {
   AgentEvent,
+  AgentOutcome,
   AgentPlan,
   AgentPlanStep,
   AgentRunResult,
@@ -394,8 +421,20 @@ export type {
   AgentStepRecord,
   AgentSynthesis,
   AgentTask,
+  AgentVerification,
   PlannerSource,
 } from "./agents/types";
+
+// --- ai runtime orchestrator -----------------------------------------------
+export {
+  AlphaAiRuntime,
+  type AlphaAiRuntimeOptions,
+  type RespondRequest,
+  type RespondResult,
+  type RespondRoute,
+  type RespondVerification,
+  type RouteDecision,
+} from "./runtime/orchestrator";
 
 // --- automation -------------------------------------------------------------
 export {

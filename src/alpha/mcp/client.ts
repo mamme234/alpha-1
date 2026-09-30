@@ -12,6 +12,7 @@ import { AlphaToolError, AlphaValidationError } from "../core/errors";
 import type { AlphaPermission } from "../security/policy";
 import type { AlphaToolDefinition, AlphaToolRegistry, ToolDescriptor } from "../tools/registry";
 import { objectSchema, type JsonSchema } from "../tools/schema";
+import { assessInjectionRisk } from "../security/validation";
 import {
   MCP_METHODS,
   MCP_PROTOCOL_VERSION,
@@ -206,6 +207,8 @@ export type RegisterMcpToolsOptions = {
   deny?: string[];
   /** Prefix applied to tool names registered in Alpha. */
   prefix?: string;
+  /** Wall-clock budget per MCP call. Defaults to 20s. */
+  timeoutMs?: number;
 };
 
 /**
@@ -229,26 +232,46 @@ export async function registerMcpTools(
     const alphaName = `${prefix}.${tool.name}`.replace(/[^a-z0-9._]/gi, "_").toLowerCase();
     if (registry.has(alphaName)) continue;
     const destructive = tool.annotations?.destructiveHint === true;
-    const definition: AlphaToolDefinition<Record<string, unknown>, Record<string, unknown>> = {
+    const definition: AlphaToolDefinition<Record<string, unknown>, McpNormalisedResult> = {
       name: alphaName,
       description: `${tool.description ?? "MCP tool"} (provided by an MCP server; arguments validated by Alpha before the call).`,
       module: "mcp",
       version: "0.1.0",
       inputSchema: convertJsonSchema(tool.inputSchema),
+      // The normalised shape every MCP result is reduced to, so a caller
+      // never has to know which server produced it.
+      outputSchema: objectSchema(
+        {
+          ok: { type: "boolean" },
+          text: { type: "string" },
+          blocks: { type: "number" },
+          server: { type: "string" },
+          requestId: { type: "string" },
+        },
+        ["ok", "text", "blocks", "server", "requestId"],
+      ),
+      timeoutMs: options.timeoutMs ?? DEFAULT_MCP_TIMEOUT_MS,
       permission: options.permission ?? (destructive ? "tool.execute.dangerous" : "tool.execute"),
       source: "mcp",
       requiresApproval: options.requiresApproval ?? destructive,
       dangerous: destructive,
       characteristics: { networked: true, mutates: destructive },
       tags: ["mcp", "external", "tools"],
-      handler: async (args) => {
+      handler: async (args, ctx) => {
+        // Every call carries a request id, so a result can be correlated with
+        // the execution record and the audit entry that produced it.
+        const requestId = mcpCallId();
+        ctx.meta.mcpRequestId = requestId;
         const result = await client.callTool(tool.name, args);
+        const normalised = normaliseMcpResult(result, client.info.server?.name ?? "unknown", requestId);
+        // MCP output is remote data: it is scored for injection and labelled
+        // as untrusted before it can reach a model's context.
+        const assessment = assessInjectionRisk(normalised.text);
         return {
-          ok: result.isError !== true,
-          text: mcpContentToText(result.content),
-          blocks: result.content.length,
-          server: client.info.server?.name ?? "unknown",
-        };
+          ...normalised,
+          untrusted: assessment.level !== "low",
+          injectionRisk: assessment.level,
+        } as McpNormalisedResult;
       },
       verify: (output) => ({
         ok: output.ok !== false,
@@ -258,6 +281,39 @@ export async function registerMcpTools(
     registered.push(registry.register(definition));
   }
   return registered;
+}
+
+/** Default per-call budget for an MCP tool. */
+export const DEFAULT_MCP_TIMEOUT_MS = 20_000;
+
+/**
+ * The one shape every MCP result is reduced to, whatever the server returned.
+ * Alpha's own layers never see a raw MCP payload.
+ */
+export type McpNormalisedResult = {
+  ok: boolean;
+  text: string;
+  blocks: number;
+  server: string;
+  requestId: string;
+  /** True when the remote text looked like an injection attempt. */
+  untrusted?: boolean;
+  injectionRisk?: string;
+};
+
+/** Flatten an MCP result into Alpha's canonical shape. */
+export function normaliseMcpResult(
+  result: McpCallToolResult,
+  server: string,
+  requestId: string,
+): McpNormalisedResult {
+  return {
+    ok: result.isError !== true,
+    text: mcpContentToText(result.content ?? []),
+    blocks: (result.content ?? []).length,
+    server,
+    requestId,
+  };
 }
 
 /** A client that is deliberately not connected — used to show NOT CONFIGURED. */

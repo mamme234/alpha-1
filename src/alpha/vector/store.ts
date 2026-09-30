@@ -11,7 +11,7 @@
  * search is O(records x dimension).
  */
 
-import { AlphaValidationError } from "../core/errors";
+import { AlphaPermissionError, AlphaValidationError } from "../core/errors";
 import { cosineSimilarity, dotProduct, euclideanDistance } from "../embeddings/embedder";
 
 export type VectorMetric = "cosine" | "dot" | "euclidean";
@@ -24,6 +24,13 @@ export type VectorRecord<TMetadata = Record<string, unknown>> = {
   metadata: TMetadata;
   /** Optional grouping key, e.g. the document a chunk came from. */
   sourceId?: string;
+  /**
+   * The account that owns this record. A search scoped to a different owner
+   * cannot see it — this is enforced in `search`, not by convention.
+   */
+  ownerId: string;
+  /** Which embedding produced this vector, so a mixed-model store is detectable. */
+  embedding: { model: string; version: string; dimension: number };
   createdAt: number;
   updatedAt: number;
 };
@@ -50,6 +57,12 @@ export type VectorSearchRequest = {
   /** Drop hits below this score (cosine/dot) or above this distance (euclidean). */
   minScore?: number;
   filter?: (record: VectorRecord) => boolean;
+  /**
+   * The account performing the search. When present, only records with a
+   * matching `ownerId` are considered — cross-user retrieval returns nothing
+   * rather than a shared collection.
+   */
+  ownerId?: string;
 };
 
 export type VectorStoreSnapshot = {
@@ -145,6 +158,10 @@ export class AlphaVectorStore {
     text: string;
     metadata?: Record<string, unknown>;
     sourceId?: string;
+    /** Required: an unowned vector could be retrieved by anyone. */
+    ownerId: string;
+    /** Which model produced the vector. Recorded so the store is auditable. */
+    embedding?: { model: string; version: string };
   }): VectorRecord {
     const info = this.collections.get(input.collection);
     if (!info) {
@@ -152,6 +169,9 @@ export class AlphaVectorStore {
         "vector",
         `collection "${input.collection}" does not exist; create it first`,
       );
+    }
+    if (!input.ownerId) {
+      throw new AlphaValidationError("vector", "a vector needs an ownerId; ownership is not optional");
     }
     if (input.vector.length !== info.dimension) {
       throw new AlphaValidationError(
@@ -170,11 +190,72 @@ export class AlphaVectorStore {
       text: input.text,
       metadata: input.metadata ?? {},
       sourceId: input.sourceId,
+      ownerId: input.ownerId,
+      embedding: {
+        model: input.embedding?.model ?? "unknown",
+        version: input.embedding?.version ?? "0.0.0",
+        dimension: info.dimension,
+      },
       createdAt: now,
       updatedAt: now,
     };
     this.records.set(record.id, record);
     return record;
+  }
+
+  /**
+   * Read a record, enforcing ownership. A caller that does not own the record
+   * is told it does not exist rather than that it does — the difference would
+   * leak another account's data.
+   */
+  getOwned(id: string, ownerId: string): VectorRecord | null {
+    const record = this.records.get(id);
+    if (!record || record.ownerId !== ownerId) return null;
+    return record;
+  }
+
+  /** Delete a record only if the caller owns it. */
+  deleteOwned(id: string, ownerId: string): boolean {
+    const record = this.records.get(id);
+    if (!record || record.ownerId !== ownerId) return false;
+    return this.records.delete(id);
+  }
+
+  /** Update a record only if the caller owns it. */
+  updateOwned(
+    id: string,
+    ownerId: string,
+    patch: Partial<Pick<VectorRecord, "vector" | "text" | "metadata">>,
+  ): VectorRecord {
+    const record = this.records.get(id);
+    if (!record || record.ownerId !== ownerId) {
+      throw new AlphaPermissionError("vector", `record "${id}" is not owned by this account`);
+    }
+    return this.update(id, patch);
+  }
+
+  /** Every collection this owner has written to, with their record counts. */
+  collectionsFor(ownerId: string): VectorCollectionInfo[] {
+    const names = new Set<string>();
+    for (const record of this.records.values()) {
+      if (record.ownerId === ownerId) names.add(record.collection);
+    }
+    return [...names]
+      .sort()
+      .map((name) => this.getCollection(name))
+      .filter((info): info is VectorCollectionInfo => info !== null);
+  }
+
+  /** Delete everything one account owns. Used when an account is removed. */
+  purgeOwner(ownerId: string): number {
+    let removed = 0;
+    for (const [id, record] of this.records) {
+      if (record.ownerId === ownerId) {
+        this.records.delete(id);
+        removed++;
+      }
+    }
+    return removed;
   }
 
   /** Insert or replace. */
@@ -256,6 +337,10 @@ export class AlphaVectorStore {
     const scored: { record: VectorRecord; score: number }[] = [];
     for (const record of this.records.values()) {
       if (record.collection !== request.collection) continue;
+      // Ownership is checked before scoring, so a record belonging to another
+      // account can never influence another account's ranking, not even by
+      // being silently filtered out of the top-k.
+      if (request.ownerId !== undefined && record.ownerId !== request.ownerId) continue;
       if (request.filter && !request.filter(record)) continue;
       const score = scoreFor(info.metric, request.vector, record.vector);
       if (request.minScore !== undefined && score < request.minScore) continue;

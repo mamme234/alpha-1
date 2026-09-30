@@ -62,7 +62,7 @@ import { AlphaContextEngine, type AssembledContext } from "./context/engine";
 import { AlphaEmbedder } from "./embeddings/embedder";
 import { AlphaVectorStore, type VectorCollectionInfo, type VectorRecord } from "./vector/store";
 import { AlphaRagPipeline, type IngestedDocument, type RagAnswer } from "./rag/pipeline";
-import { AlphaMemoryStore, type MemoryRecord, type MemoryScope } from "./memory/store";
+import { AlphaMemoryStore, type MemoryProvenance, type MemoryRecord, type MemoryScope } from "./memory/store";
 import { AlphaPolicyEngine } from "./security/policy";
 import { AlphaRateLimiter, type RateLimitPolicy } from "./security/rate-limit";
 import { AlphaAuditLog } from "./security/audit";
@@ -243,6 +243,13 @@ export class AlphaWorkspace {
    * turned into tokens.
    */
   readonly inferenceService = new AlphaInferenceService();
+
+  /**
+   * The orchestration layer. `respond()` is the one entry point a conversation
+   * needs: it decides between plain inference, memory, retrieval, a tool and an
+   * agent run, and reports exactly what it did. Built during initialisation.
+   */
+  aiRuntime: AlphaAiRuntime | null = null;
 
   model: AlphaTransformer;
   tokenizer: AlphaTokenizer | null = null;
@@ -483,6 +490,18 @@ export class AlphaWorkspace {
       },
     });
 
+    this.aiRuntime = new AlphaAiRuntime({
+      inference: this.inference!,
+      context: this.context!,
+      memory: this.memory!,
+      rag: this.rag!,
+      tools: this.tools,
+      agents: this.agents,
+      policy: this.policy,
+      rateLimiter: this.rateLimiter,
+      audit: this.audit,
+    });
+
     this.observability.tracer.onSpanEnd((event) => {
       this.pendingSpans.push(event.span);
       if (this.pendingSpans.length > 200) {
@@ -584,6 +603,21 @@ export class AlphaWorkspace {
         memory: this.memory ?? undefined,
         audit: this.audit,
         rateLimiter: this.rateLimiter,
+      });
+    }
+    // The orchestrator holds references to the pieces above, so it is rebuilt
+    // whenever the model, memory or agent runtime is replaced.
+    if (this.inference && this.context && this.memory && this.rag) {
+      this.aiRuntime = new AlphaAiRuntime({
+        inference: this.inference,
+        context: this.context,
+        memory: this.memory,
+        rag: this.rag,
+        tools: this.tools,
+        agents: this.agents,
+        policy: this.policy,
+        rateLimiter: this.rateLimiter,
+        audit: this.audit,
       });
     }
     // The inference service must never serve a stale stage or stale weights.
@@ -1010,13 +1044,19 @@ export class AlphaWorkspace {
   async ingestDocument(input: {
     title: string;
     content: string;
+    /** Optional: defaults to the workspace's own actor. */
+    ownerId?: string;
     kind?: string;
     license?: string;
     metadata?: Record<string, string>;
   }): Promise<IngestedDocument> {
     const { rag } = this.requireReady();
+    const ownerId = input.ownerId ?? this.ownerActorId;
+    if (!ownerId) {
+      throw new AlphaError("alpha.validation_failed", "rag", "ingestDocument needs an ownerId");
+    }
     const span = this.observability.startSpan({ name: "rag.ingest", kind: "retrieval", module: "rag" });
-    const { document } = rag.ingest(input);
+    const { document } = rag.ingest({ ...input, ownerId });
     this.observability.recordRagIngestion(document);
     this.observability.recordEmbedding(document.chunks, this.vectorStore.getCollection(rag.collectionName)?.dimension ?? 0);
     this.observability.endSpan(span, { attributes: { chunks: document.chunks, tokens: document.tokens } });
@@ -1044,7 +1084,7 @@ export class AlphaWorkspace {
     const { rag } = this.requireReady();
     const traceId = newTraceId();
     const span = this.observability.startSpan({ name: "rag.answer", kind: "retrieval", module: "rag", traceId });
-    const answer = rag.answer(question, sampling);
+    const answer = rag.answer(question, sampling, { ownerId: this.ownerActorId });
     this.lastGeneration = answer.generation;
     this.observability.recordRagRetrieval(answer, traceId);
     this.observability.recordInference(answer.generation, traceId);
@@ -1066,6 +1106,8 @@ export class AlphaWorkspace {
   }
 
   writeMemory(input: {
+    ownerId?: string;
+    provenance?: Partial<MemoryProvenance>;
     scope: MemoryScope;
     key: string;
     content: string;
@@ -1078,7 +1120,17 @@ export class AlphaWorkspace {
       this.observability.recordPolicyDenial(this.ownerActorId, "memory.write.long-term", "approval missing");
       throw new AlphaError("alpha.permission_denied", "memory", "long-term memory requires explicit approval");
     }
-    const record = memory.write({ ...input, source: "user", approved: input.approved });
+    const record = memory.write({
+      ...input,
+      ownerId: input.ownerId ?? this.ownerActorId,
+      source: "user",
+      approved: input.approved,
+      provenance: input.provenance ?? {
+        origin: "user",
+        referenceId: input.sessionId ?? null,
+        recordedBy: this.ownerActorId,
+      },
+    });
     this.observability.recordMemoryWrite(record.scope, record.key);
     void this.persist("memories");
     return record;

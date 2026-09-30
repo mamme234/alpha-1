@@ -16,6 +16,87 @@ import type { AlphaTokenizer } from "../tokenizer/bpe";
 
 export type PoolingStrategy = "mean" | "last-token";
 
+/**
+ * Alpha's one authoritative embedding configuration.
+ *
+ * There is deliberately exactly one of these. A vector store holding vectors
+ * from two different pooling strategies or model versions would be
+ * unsearchable, so the settings that define a vector live in one immutable
+ * record that can be compared, stored beside the vectors, and checked when a
+ * store is reloaded.
+ */
+export type AlphaEmbeddingConfig = {
+  /** Schema version of this record, so a stored config can be validated. */
+  version: string;
+  /** Model name the vectors come from. */
+  model: string;
+  /** Model version the vectors come from. */
+  modelVersion: string;
+  /** How token hidden states are reduced to one vector. */
+  pooling: PoolingStrategy;
+  /** Vector length. Always the model's `dModel`. */
+  dimension: number;
+  /** Longest text embedded; longer inputs are truncated. */
+  maxTokens: number;
+  /** Vectors are L2-normalised, so cosine similarity is a dot product. */
+  normalized: true;
+};
+
+/** Build the authoritative config for a model/tokenizer pair. */
+export function createEmbeddingConfig(input: {
+  model: AlphaTransformer;
+  tokenizer: AlphaTokenizer;
+  pooling?: PoolingStrategy;
+  maxTokens?: number;
+  version?: string;
+}): AlphaEmbeddingConfig {
+  const pooling = input.pooling ?? "mean";
+  if (pooling !== "mean" && pooling !== "last-token") {
+    throw new Error(`[alpha:embeddings] unsupported pooling strategy: ${pooling}`);
+  }
+  const maxTokens = Math.min(
+    input.maxTokens ?? input.model.config.contextLength,
+    input.model.config.contextLength,
+  );
+  if (maxTokens < 1) {
+    throw new Error("[alpha:embeddings] maxTokens must be at least 1");
+  }
+  return Object.freeze({
+    version: input.version ?? "1.0.0",
+    model: input.model.config.name,
+    modelVersion: input.model.config.version,
+    pooling,
+    dimension: input.model.config.dModel,
+    maxTokens,
+    normalized: true as const,
+  });
+}
+
+/** True when two configs would produce comparable vectors. */
+export function embeddingConfigsMatch(a: AlphaEmbeddingConfig, b: AlphaEmbeddingConfig): boolean {
+  return (
+    a.model === b.model &&
+    a.modelVersion === b.modelVersion &&
+    a.pooling === b.pooling &&
+    a.dimension === b.dimension
+  );
+}
+
+/** Why two configs do not match, in one sentence. */
+export function describeEmbeddingConfigMismatch(
+  a: AlphaEmbeddingConfig,
+  b: AlphaEmbeddingConfig,
+): string | null {
+  if (embeddingConfigsMatch(a, b)) return null;
+  const parts: string[] = [];
+  if (a.model !== b.model || a.modelVersion !== b.modelVersion) {
+    parts.push(`model ${a.model}@${a.modelVersion} vs ${b.model}@${b.modelVersion}`);
+  }
+  if (a.pooling !== b.pooling) parts.push(`pooling ${a.pooling} vs ${b.pooling}`);
+  if (a.dimension !== b.dimension) parts.push(`dimension ${a.dimension} vs ${b.dimension}`);
+  return parts.join("; ");
+}
+
 export type EmbeddingRecord = {
   /** The embedded text (or the original text when embedding a document). */
   text: string;
@@ -24,6 +105,8 @@ export type EmbeddingRecord = {
   tokens: number;
   truncated: boolean;
   modelStage: AlphaModelStage;
+  /** The config that produced this vector, for store-level comparability. */
+  config: AlphaEmbeddingConfig;
 };
 
 export type AlphaEmbedderOptions = {
@@ -43,16 +126,21 @@ export class AlphaEmbedder {
   readonly stage: AlphaModelStage;
   readonly pooling: PoolingStrategy;
   readonly maxTokens: number;
+  /** The single authoritative description of the vectors this embedder makes. */
+  readonly config: AlphaEmbeddingConfig;
 
   constructor(options: AlphaEmbedderOptions) {
     this.model = options.model;
     this.tokenizer = options.tokenizer;
     this.stage = options.stage ?? "untrained";
-    this.pooling = options.pooling ?? "mean";
-    this.maxTokens = Math.min(
-      options.maxTokens ?? options.model.config.contextLength,
-      options.model.config.contextLength,
-    );
+    this.config = createEmbeddingConfig({
+      model: options.model,
+      tokenizer: options.tokenizer,
+      pooling: options.pooling,
+      maxTokens: options.maxTokens,
+    });
+    this.pooling = this.config.pooling;
+    this.maxTokens = this.config.maxTokens;
   }
 
   get dimension(): number {
@@ -91,6 +179,7 @@ export class AlphaEmbedder {
       tokens: ids.length,
       truncated: encoded.truncated,
       modelStage: this.stage,
+      config: this.config,
     };
   }
 
@@ -107,6 +196,22 @@ export class AlphaEmbedder {
   /** Plain vectors, for callers that only need the numbers. */
   vectors(texts: string[]): number[][] {
     return this.embedDocuments(texts).map((record) => record.vector);
+  }
+
+  /**
+   * A portable snapshot of the embedder's identity. Restoring from this is how
+   * a reloaded store can check its vectors came from the same configuration.
+   */
+  describe(): {
+    config: AlphaEmbeddingConfig;
+    modelStage: AlphaModelStage;
+    parameterCount: number;
+  } {
+    return {
+      config: this.config,
+      modelStage: this.stage,
+      parameterCount: this.model.parameterCount,
+    };
   }
 }
 

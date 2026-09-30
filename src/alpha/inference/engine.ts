@@ -12,8 +12,10 @@
  * truncated distribution using Alpha's own seeded generator, so the same seed
  * reproduces the same tokens.
  *
- * Note on performance: generation re-runs the full prefix each step (no KV
- * cache yet). KV caching is listed as in-development in the architecture docs.
+ * Performance: decoding uses a KV cache, so each new token attends against the
+ * stored keys/values of the prefix instead of re-running it. The cached path is
+ * verified to produce bit-identical logits to the uncached forward pass, so
+ * enabling it changes speed and nothing else.
  */
 
 import { AlphaRng } from "../core/rng";
@@ -21,6 +23,7 @@ import { AlphaValidationError } from "../core/errors";
 import { assertResourceLimit } from "../core/limits";
 import { setGradEnabled } from "../core/tensor";
 import type { AlphaModelStage } from "../core/types";
+import { createKvCache, kvCacheStats, resetKvCache, type KvCache, type KvCacheStats } from "../model/kv-cache";
 import type { AlphaTransformer } from "../model/transformer";
 import type { AlphaTokenizer } from "../tokenizer/bpe";
 
@@ -63,7 +66,8 @@ export type StopReason =
   | "stop-token"
   | "stop-sequence"
   | "max-tokens"
-  | "context-limit";
+  | "context-limit"
+  | "cancelled";
 
 export type GenerationResult = {
   text: string;
@@ -85,7 +89,40 @@ export type GenerationResult = {
   sampling: SamplingConfig;
   /** How the model produced the first token: "greedy" or "sampled". */
   decoding: "greedy" | "sampled";
+  /** How the decode loop ran: with a KV cache, or recomputing the prefix. */
+  cache: KvCacheStats;
+  /** Wall-clock split of the decode, in milliseconds. */
+  timing: { prefillMs: number; decodeMs: number };
 };
+
+/**
+ * A cooperative cancellation handle. Alpha is CPU-bound JavaScript, so a
+ * generation can only stop at a token boundary — but it stops promptly, and the
+ * partial result is returned with `stopReason: "cancelled"` rather than being
+ * discarded. Nothing is thrown away silently.
+ */
+export type GenerationCancellation = {
+  readonly cancelled: boolean;
+  readonly reason: string | null;
+  cancel(reason?: string): void;
+};
+
+export function createGenerationCancellation(): GenerationCancellation {
+  let cancelled = false;
+  let reason: string | null = null;
+  return {
+    get cancelled() {
+      return cancelled;
+    },
+    get reason() {
+      return reason;
+    },
+    cancel(why?: string) {
+      cancelled = true;
+      reason = why ?? "cancelled by caller";
+    },
+  };
+}
 
 export type GenerationStreamChunk = {
   token: string;
@@ -102,6 +139,12 @@ export type InferenceEngineOptions = {
   stage?: AlphaModelStage;
   /** Hard cap on prompt + completion length; defaults to the model context. */
   maxContextTokens?: number;
+  /**
+   * Use the KV cache. On by default; set false to run the original
+   * recompute-the-prefix loop, which produces the same tokens more slowly and
+   * exists so the two paths can be compared in tests and benchmarks.
+   */
+  useCache?: boolean;
 };
 
 export function untrainedWarning(stage: AlphaModelStage): string | null {
@@ -118,6 +161,15 @@ export function untrainedWarning(stage: AlphaModelStage): string | null {
   }
 }
 
+/** One token emitted by the shared decode loop. */
+type DecodeStep = {
+  id: number;
+  /** Cumulative text including this token (and excluding any stop sequence). */
+  text: string;
+  /** True when this token ended generation. */
+  done: boolean;
+};
+
 /** Mutable state carried through one generation loop. */
 type DecodeState = {
   config: SamplingConfig;
@@ -127,6 +179,7 @@ type DecodeState = {
   promptTokens: number;
   stopReason: StopReason;
   text: string;
+  timing: { prefillMs: number; decodeMs: number };
 };
 
 export class AlphaInferenceEngine {
@@ -134,6 +187,8 @@ export class AlphaInferenceEngine {
   readonly tokenizer: AlphaTokenizer;
   readonly stage: AlphaModelStage;
   readonly maxContextTokens: number;
+  /** Whether decoding uses the KV cache. Both paths emit the same tokens. */
+  readonly useCache: boolean;
 
   constructor(options: InferenceEngineOptions) {
     this.model = options.model;
@@ -143,6 +198,7 @@ export class AlphaInferenceEngine {
       options.maxContextTokens ?? options.model.config.contextLength,
       options.model.config.contextLength,
     );
+    this.useCache = options.useCache ?? true;
   }
 
   /** Validate and merge a partial sampling configuration against the defaults. */
@@ -297,10 +353,124 @@ export class AlphaInferenceEngine {
       promptTokens: promptIds.length,
       stopReason: "max-tokens",
       text: "",
+      timing: { prefillMs: 0, decodeMs: 0 },
     };
   }
 
-  private finish(state: DecodeState, startedAt: number): GenerationResult {
+  /**
+   * Run the prompt through the model once, priming a cache when one is in use.
+   * Returns the logits of the final position, which is what the first sampled
+   * token is chosen from.
+   */
+  private prime(
+    state: DecodeState,
+    cache: KvCache | null,
+  ): { logits: Float32Array; prefillMs: number } {
+    const started = performance.now();
+    const ids = Int32Array.from(state.context);
+    const vocab = this.model.config.vocabSize;
+    let logits: Float32Array;
+    if (cache) {
+      resetKvCache(cache);
+      const result = this.model.forwardCached(ids, 1, ids.length, { cache, incremental: false });
+      logits = result.logits.data.subarray(
+        (ids.length - 1) * vocab,
+        ids.length * vocab,
+      ) as Float32Array;
+    } else {
+      const result = this.model.forward(ids, 1, ids.length, { training: false });
+      logits = result.logits.data.subarray(
+        (ids.length - 1) * vocab,
+        ids.length * vocab,
+      ) as Float32Array;
+    }
+    return { logits, prefillMs: performance.now() - started };
+  }
+
+  /** One incremental token step: process `tokenId` at its position in the cache. */
+  private stepFromCache(cache: KvCache, tokenId: number): Float32Array {
+    const vocab = this.model.config.vocabSize;
+    const result = this.model.forwardCached(Int32Array.from([tokenId]), 1, 1, {
+      cache,
+      incremental: true,
+    });
+    return result.logits.data.subarray(0, vocab) as Float32Array;
+  }
+
+  /**
+   * Shared decode loop. The two implementations differ only in how the logits
+   * for the next token are obtained; every sampling and stop decision is
+   * identical, which is what makes the cached path a pure optimisation.
+   */
+  private *decode(
+    state: DecodeState,
+    rng: AlphaRng,
+    cache: KvCache | null,
+    cancellation: GenerationCancellation | null,
+  ): Generator<DecodeStep, void, void> {
+    const { logits: firstLogits, prefillMs } = this.prime(state, cache);
+    let logits = firstLogits;
+    const decodeStart = performance.now();
+    // The last sampled token has not yet been processed by the cache; it is
+    // fed in at the top of the next iteration to produce the logits for the
+    // position after it.
+    let pending: number | null = null;
+
+    try {
+      while (state.generated.length < state.config.maxNewTokens) {
+        if (cancellation?.cancelled) {
+          state.stopReason = "cancelled";
+          return;
+        }
+        if (state.context.length >= this.maxContextTokens) {
+          state.stopReason = "context-limit";
+          return;
+        }
+        if (pending !== null) {
+          if (cache) {
+            if (cache.length >= cache.capacity) {
+              state.stopReason = "context-limit";
+              return;
+            }
+            logits = this.stepFromCache(cache, pending);
+          } else {
+            logits = this.forwardLastRow(state.context);
+          }
+        }
+
+        const { id, logProb } = this.sampleNextToken(logits, state.generated, state.config, rng);
+        if (id === this.tokenizer.eosId) {
+          state.stopReason = "eos";
+          return;
+        }
+        if (state.config.stopTokenIds.includes(id)) {
+          state.stopReason = "stop-token";
+          return;
+        }
+        pending = id;
+        state.generated.push(id);
+        state.tokenLogProbs.push(logProb);
+        state.context.push(id);
+        state.text = this.tokenizer.decode(state.generated);
+        const matched = state.config.stopSequences.find(
+          (seq) => seq.length > 0 && state.text.endsWith(seq),
+        );
+        if (matched) {
+          state.text = state.text.slice(0, state.text.length - matched.length);
+          state.stopReason = "stop-sequence";
+          yield { id, text: state.text, done: true };
+          return;
+        }
+        yield { id, text: state.text, done: false };
+      }
+    } finally {
+      // Recorded on every exit path, including cancellation and the stop
+      // conditions above, so a timing report is never silently zeroed.
+      state.timing = { prefillMs, decodeMs: performance.now() - decodeStart };
+    }
+  }
+
+  private finish(state: DecodeState, startedAt: number, cache: KvCache | null): GenerationResult {
     const latencyMs = Date.now() - startedAt;
     const meanNll =
       state.tokenLogProbs.length === 0
@@ -323,101 +493,71 @@ export class AlphaInferenceEngine {
       meanNll,
       sampling: state.config,
       decoding: deterministic ? "greedy" : "sampled",
+      cache: kvCacheStats(cache, cache !== null),
+      timing: {
+        prefillMs: Number(state.timing.prefillMs.toFixed(3)),
+        decodeMs: Number(state.timing.decodeMs.toFixed(3)),
+      },
     };
   }
 
   /** Full generation, no streaming. */
-  generate(prompt: string, sampling: Partial<SamplingConfig> = {}): GenerationResult {
+  generate(
+    prompt: string,
+    sampling: Partial<SamplingConfig> = {},
+    options: { cancellation?: GenerationCancellation | null } = {},
+  ): GenerationResult {
     const config = this.resolveSampling(sampling);
     const started = Date.now();
     const rng = new AlphaRng(config.seed);
     const encoded = this.encodePrompt(prompt);
     const state = this.decodeLoopState(config, encoded.ids);
+    const cache = this.useCache ? createKvCache(this.model.config) : null;
 
     setGradEnabled(false);
     try {
-      while (state.generated.length < config.maxNewTokens) {
-        if (state.context.length >= this.maxContextTokens) {
-          state.stopReason = "context-limit";
-          break;
-        }
-        const logits = this.forwardLastRow(state.context);
-        const { id, logProb } = this.sampleNextToken(logits, state.generated, config, rng);
-        if (id === this.tokenizer.eosId) {
-          state.stopReason = "eos";
-          break;
-        }
-        if (config.stopTokenIds.includes(id)) {
-          state.stopReason = "stop-token";
-          break;
-        }
-        state.generated.push(id);
-        state.tokenLogProbs.push(logProb);
-        state.context.push(id);
-        state.text = this.tokenizer.decode(state.generated);
-        const matched = config.stopSequences.find((seq) => seq.length > 0 && state.text.endsWith(seq));
-        if (matched) {
-          state.text = state.text.slice(0, state.text.length - matched.length);
-          state.stopReason = "stop-sequence";
-          break;
-        }
+      // The loop is consumed for its side effects; `finish` reads the state.
+      for (const _step of this.decode(state, rng, cache, options.cancellation ?? null)) {
+        void _step;
       }
     } finally {
       setGradEnabled(true);
     }
 
-    return this.finish(state, started);
+    return this.finish(state, started, cache);
   }
 
   /** Incremental generation for a chat-style UI. */
   async *generateStream(
     prompt: string,
     sampling: Partial<SamplingConfig> = {},
+    options: { cancellation?: GenerationCancellation | null } = {},
   ): AsyncGenerator<GenerationStreamChunk, GenerationResult, void> {
     const config = this.resolveSampling(sampling);
     const started = Date.now();
     const rng = new AlphaRng(config.seed);
     const encoded = this.encodePrompt(prompt);
     const state = this.decodeLoopState(config, encoded.ids);
+    const cache = this.useCache ? createKvCache(this.model.config) : null;
 
     setGradEnabled(false);
     try {
       let index = 0;
-      while (state.generated.length < config.maxNewTokens) {
-        if (state.context.length >= this.maxContextTokens) {
-          state.stopReason = "context-limit";
-          break;
-        }
-        const logits = this.forwardLastRow(state.context);
-        const { id, logProb } = this.sampleNextToken(logits, state.generated, config, rng);
-        if (id === this.tokenizer.eosId) {
-          state.stopReason = "eos";
-          break;
-        }
-        if (config.stopTokenIds.includes(id)) {
-          state.stopReason = "stop-token";
-          break;
-        }
-        state.generated.push(id);
-        state.tokenLogProbs.push(logProb);
-        state.context.push(id);
-        state.text = this.tokenizer.decode(state.generated);
-        const matched = config.stopSequences.find((seq) => seq.length > 0 && state.text.endsWith(seq));
-        const tokenText = this.tokenizer.decode([id]);
-        if (matched) {
-          state.stopReason = "stop-sequence";
-          const trimmed = state.text.slice(0, state.text.length - matched.length);
-          state.text = trimmed;
-          yield { token: tokenText, tokenId: id, text: trimmed, index: index++, done: true, stopReason: state.stopReason };
-          break;
-        }
-        yield { token: tokenText, tokenId: id, text: state.text, index: index++, done: false };
+      for (const step of this.decode(state, rng, cache, options.cancellation ?? null)) {
+        yield {
+          token: this.tokenizer.decode([step.id]),
+          tokenId: step.id,
+          text: step.text,
+          index: index++,
+          done: step.done,
+          ...(step.done ? { stopReason: state.stopReason } : {}),
+        };
       }
     } finally {
       setGradEnabled(true);
     }
 
-    return this.finish(state, started);
+    return this.finish(state, started, cache);
   }
 
   /** Next-token scores for a prompt — used by diagnostics in the workspace. */

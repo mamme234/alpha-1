@@ -202,6 +202,8 @@ export class AlphaRagPipeline {
   ingest(input: {
     title: string;
     content: string;
+    /** Required: an unowned document could be retrieved by any account. */
+    ownerId: string;
     kind?: string;
     metadata?: Record<string, string>;
     license?: string;
@@ -217,6 +219,11 @@ export class AlphaRagPipeline {
         vector: embedded.vector,
         text: chunk.text,
         sourceId: source.id,
+        ownerId: input.ownerId,
+        embedding: {
+          model: this.embedder.model.config.name,
+          version: this.embedder.model.config.version,
+        },
         metadata: {
           ...chunk.metadata,
           title: chunk.title,
@@ -249,8 +256,17 @@ export class AlphaRagPipeline {
     return removed;
   }
 
-  /** Semantic search: embed the query with Alpha, scan the vector store. */
-  retrieve(query: string, options: { topK?: number; minScore?: number } = {}): VectorSearchHit[] {
+  /**
+   * Semantic search: embed the query with Alpha, scan the vector store.
+   *
+   * `ownerId` is required. Retrieval is always scoped to the requesting
+   * account, so a document ingested by one user can never be returned for
+   * another — the store enforces it, this is where the caller supplies it.
+   */
+  retrieve(
+    query: string,
+    options: { topK?: number; minScore?: number; ownerId: string },
+  ): VectorSearchHit[] {
     this.ensureCollection();
     if (this.store.count(this.collectionName) === 0) return [];
     const embedded = this.embedder.embedQuery(query);
@@ -259,6 +275,7 @@ export class AlphaRagPipeline {
       vector: embedded.vector,
       topK: options.topK ?? this.config.topK,
       minScore: options.minScore ?? this.config.minScore,
+      ownerId: options.ownerId,
     });
   }
 
@@ -290,8 +307,8 @@ export class AlphaRagPipeline {
   }
 
   /** Full pipeline: query -> retrieve -> assemble -> generate, with citations. */
-  answer(query: string, sampling: Partial<SamplingConfig> = {}): RagAnswer {
-    const hits = this.retrieve(query);
+  answer(query: string, sampling: Partial<SamplingConfig> = {}, options: { ownerId: string }): RagAnswer {
+    const hits = this.retrieve(query, { ownerId: options.ownerId });
     const { context, sources, tokens } = this.buildContext(hits);
     const prompt = buildRagPrompt(query, context);
     const generation = this.inference.generate(prompt, sampling);
@@ -311,8 +328,9 @@ export class AlphaRagPipeline {
   async *answerStream(
     query: string,
     sampling: Partial<SamplingConfig> = {},
+    options: { ownerId: string },
   ): AsyncGenerator<{ type: "sources"; sources: RagAnswerSource[] } | { type: "delta"; text: string } | { type: "done"; answer: RagAnswer }, void, void> {
-    const hits = this.retrieve(query);
+    const hits = this.retrieve(query, { ownerId: options.ownerId });
     const { context, sources, tokens } = this.buildContext(hits);
     yield { type: "sources", sources };
     const prompt = buildRagPrompt(query, context);

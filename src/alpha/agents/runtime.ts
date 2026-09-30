@@ -25,6 +25,7 @@ import type { AlphaRateLimiter } from "../security/rate-limit";
 import { AlphaSandbox, DEFAULT_SANDBOX, type SandboxSpec } from "../security/sandbox";
 import type { AlphaToolRegistry, ToolExecutionRecord } from "../tools/registry";
 import { planFromCapabilities, planWithModel } from "./planner";
+import { verifyAgentOutcome, reconcileOutcome, type SandboxReport } from "./verify";
 import type {
   AgentEvent,
   AgentPlan,
@@ -33,6 +34,7 @@ import type {
   AgentRunStatus,
   AgentStepRecord,
   AgentSynthesis,
+  AgentVerification,
   AgentTask,
 } from "./types";
 
@@ -56,7 +58,36 @@ export type AgentRunRequest = {
   maxSteps?: number;
   /** Allow the planner to ask Alpha's model for a plan when it is trained. */
   preferModelPlanner?: boolean;
+  /**
+   * Stop the run at the next step boundary. A handle for the caller to hold,
+   * so a UI can abort a long run without waiting for a natural stopping point.
+   */
+  cancellation?: AgentCancellation | null;
 };
+
+/** Cooperative cancellation for an agent run, checked at every step boundary. */
+export type AgentCancellation = {
+  readonly cancelled: boolean;
+  readonly reason: string | null;
+  cancel(reason?: string): void;
+};
+
+export function createAgentCancellation(): AgentCancellation {
+  let cancelled = false;
+  let reason: string | null = null;
+  return {
+    get cancelled() {
+      return cancelled;
+    },
+    get reason() {
+      return reason;
+    },
+    cancel(why?: string) {
+      cancelled = true;
+      reason = why ?? "cancelled by caller";
+    },
+  };
+}
 
 export class AlphaAgentRuntime {
   private readonly registry: AlphaToolRegistry;
@@ -88,6 +119,8 @@ export class AlphaAgentRuntime {
       agentId: actorId,
       allowedTools,
       maxSteps: request.maxSteps ?? scope?.maxSteps ?? DEFAULT_SANDBOX.maxSteps,
+      maxToolCalls: DEFAULT_SANDBOX.maxToolCalls,
+      maxIdenticalCalls: DEFAULT_SANDBOX.maxIdenticalCalls,
       maxGeneratedTokens: DEFAULT_SANDBOX.maxGeneratedTokens,
       maxDurationMs: DEFAULT_SANDBOX.maxDurationMs,
       allowNetwork: false,
@@ -163,6 +196,22 @@ export class AlphaAgentRuntime {
 
     for (const step of plan.steps) {
       if (blocker) break;
+      if (request.cancellation?.cancelled) {
+        sandbox.cancel(request.cancellation.reason ?? "cancelled by caller");
+        blocker = request.cancellation.reason ?? "the run was cancelled";
+        history.push({
+          index: step.index,
+          phase: "blocked",
+          at: Date.now(),
+          durationMs: 0,
+          detail: blocker,
+          toolName: null,
+          ok: false,
+        });
+        yield { type: "blocked", reason: blocker };
+        this.emit({ type: "blocked", reason: blocker });
+        break;
+      }
       if (sandbox.exhausted) {
         blocker = `sandbox stopped the run: ${sandbox.spec.maxSteps} step budget or time budget reached`;
         yield { type: "blocked", reason: blocker };
@@ -188,10 +237,14 @@ export class AlphaAgentRuntime {
       }
 
       try {
-        sandbox.enterTool(descriptor.name, {
-          networked: descriptor.characteristics.networked,
-          fileSystem: descriptor.characteristics.fileSystem,
-        });
+        sandbox.enterTool(
+          descriptor.name,
+          {
+            networked: descriptor.characteristics.networked,
+            fileSystem: descriptor.characteristics.fileSystem,
+          },
+          buildToolArguments(descriptor.inputSchema, task),
+        );
       } catch (error) {
         const described = describeError(error);
         step.status = "failed";
@@ -249,7 +302,19 @@ export class AlphaAgentRuntime {
 
     // Synthesise the final answer from what the tools actually returned.
     const succeeded = plan.steps.filter((step) => step.status === "done");
-    const synthesis = this.synthesise(task, plan, sandbox);
+    // Verify the objective *before* synthesising, so the final answer is built
+    // on an honest account of what happened rather than an assumption.
+    const verification = verifyAgentOutcome({
+      plan,
+      toolCalls,
+      status: null,
+      sandbox: sandbox.report() as SandboxReport,
+      blocker,
+    });
+    yield { type: "verified", verification };
+    this.emit({ type: "verified", verification });
+
+    const synthesis = this.synthesise(task, plan, sandbox, verification);
     tokensGenerated += synthesis.tokensGenerated;
     if (this.inference) {
       try {
@@ -278,11 +343,20 @@ export class AlphaAgentRuntime {
       id: alphaId("run"),
       taskId: task.id,
       goal: task.goal,
+      actorId: request.actorId,
       status,
+      modelName: this.inference ? this.inference.model.config.name : null,
+      modelVersion: this.inference ? this.inference.model.config.version : null,
       plan,
       history,
       toolCalls,
       synthesis,
+      // The outcome is derived from what actually ran, never from `status`
+      // alone, so a run that exited cleanly but achieved nothing says so.
+      verification: {
+        ...verification,
+        outcome: reconcileOutcome(verification, status, blocker, sandbox.report() as SandboxReport),
+      },
       startedAt,
       finishedAt,
       durationMs: finishedAt - startedAt,
@@ -290,6 +364,7 @@ export class AlphaAgentRuntime {
       modelStage: this.inference ? this.inference.stage : null,
       sandbox: sandbox.report(),
       blocker,
+      errors: plan.steps.filter((step) => step.error).map((step) => step.error as string),
     };
 
     this.runs.push(result);
@@ -300,9 +375,11 @@ export class AlphaAgentRuntime {
         this.memory.write({
           scope: "session",
           sessionId: request.sessionId,
+          ownerId: request.actorId,
           key: `agent.last_run`,
           content: `Goal: ${task.goal} — ${status} via ${succeeded.map((s) => s.toolName).filter(Boolean).join(", ") || "no tools"}.`,
           source: "agent",
+          provenance: { origin: "agent-run", referenceId: result.id, recordedBy: request.actorId },
           tags: ["agent", "run"],
           importance: 0.4,
         });
@@ -340,11 +417,21 @@ export class AlphaAgentRuntime {
    * the tool results; without one, Alpha returns a structured summary and says
    * so.
    */
-  private synthesise(task: AgentTask, plan: AgentPlan, sandbox: AlphaSandbox): AgentSynthesis {
+  private synthesise(
+    task: AgentTask,
+    plan: AgentPlan,
+    sandbox: AlphaSandbox,
+    verification?: AgentVerification,
+  ): AgentSynthesis {
     const usable = plan.steps.filter((step) => step.status === "done" && step.result !== null);
     const evidence = usable
       .map((step) => `[${step.toolName}] ${truncate(JSON.stringify(step.result), 600)}`)
       .join("\n");
+    // The outcome is stated in the prompt so the model's answer cannot imply
+    // more than the evidence supports.
+    const outcomeLine = verification
+      ? `Alpha's own verification of this run: ${verification.outcome} — ${verification.reason}`
+      : null;
 
     if (!this.inference) {
       return {
@@ -360,6 +447,7 @@ export class AlphaAgentRuntime {
 
     const prompt = [
       "Instruction: answer the goal using only the tool results below. If they do not contain the answer, say so.",
+      ...(outcomeLine ? [outcomeLine] : []),
       "<<<RESULTS",
       evidence || "(no tool produced a result)",
       "RESULTS",

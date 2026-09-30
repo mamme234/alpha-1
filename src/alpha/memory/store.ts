@@ -22,6 +22,11 @@ export type MemoryRecord = {
   scope: MemoryScope;
   /** Session this memory belongs to (conversation/session scopes). */
   sessionId: string | null;
+  /**
+   * The account that owns this memory. Retrieval is scoped to it, so one
+   * account's memory can never appear in another's context.
+   */
+  ownerId: string;
   /** Short machine-readable key, e.g. "user.name". */
   key: string;
   content: string;
@@ -32,20 +37,38 @@ export type MemoryRecord = {
   /** Long-term memories must be approved before they can be recalled. */
   approved: boolean;
   source: "agent" | "user" | "system" | "tool";
+  /**
+   * Where this memory came from, in enough detail to audit it: which
+   * conversation, document or tool call produced it.
+   */
+  provenance: MemoryProvenance;
   createdAt: number;
   updatedAt: number;
   lastAccessedAt: number;
   accessCount: number;
 };
 
+/** Provenance of a memory — every stored memory must be traceable. */
+export type MemoryProvenance = {
+  /** Free-form origin, e.g. "conversation" or a tool name. */
+  origin: string;
+  /** Conversation, document or tool-call id this came from. */
+  referenceId: string | null;
+  /** Who recorded it. */
+  recordedBy: string | null;
+};
+
 export type MemoryWriteInput = {
   scope: MemoryScope;
   key: string;
   content: string;
+  /** Required: an unowned memory would be recallable by any account. */
+  ownerId: string;
   sessionId?: string | null;
   tags?: string[];
   importance?: number;
   source?: MemoryRecord["source"];
+  provenance?: Partial<MemoryProvenance>;
   /** Required for `long-term` writes. */
   approved?: boolean;
 };
@@ -104,6 +127,9 @@ export class AlphaMemoryStore {
     if (!input.key.trim()) {
       throw new AlphaValidationError("memory", "a memory needs a key");
     }
+    if (!input.ownerId) {
+      throw new AlphaValidationError("memory", "a memory needs an ownerId; ownership is not optional");
+    }
     if (input.scope === "long-term" && input.approved !== true) {
       throw new AlphaPermissionError(
         "memory",
@@ -119,7 +145,7 @@ export class AlphaMemoryStore {
     }
     const embedded = this.embedder.embed(input.content);
     const now = Date.now();
-    const existing = this.findByKey(input.scope, input.key, input.sessionId ?? null);
+    const existing = this.findByKey(input.scope, input.key, input.sessionId ?? null, input.ownerId);
     if (existing) {
       existing.content = input.content;
       existing.embedding = embedded.vector;
@@ -127,12 +153,14 @@ export class AlphaMemoryStore {
       existing.importance = input.importance ?? existing.importance;
       existing.updatedAt = now;
       existing.approved = existing.approved || input.approved === true;
+      if (input.provenance) existing.provenance = { ...existing.provenance, ...input.provenance };
       return existing;
     }
     const record: MemoryRecord = {
       id: alphaId("mem"),
       scope: input.scope,
       sessionId: input.sessionId ?? null,
+      ownerId: input.ownerId,
       key: input.key,
       content: input.content,
       embedding: embedded.vector,
@@ -140,26 +168,73 @@ export class AlphaMemoryStore {
       importance: input.importance ?? 0.5,
       approved: input.scope === "long-term" ? true : input.approved ?? true,
       source: input.source ?? "system",
+      provenance: {
+        origin: input.provenance?.origin ?? input.scope,
+        referenceId: input.provenance?.referenceId ?? input.sessionId ?? null,
+        recordedBy: input.provenance?.recordedBy ?? input.ownerId,
+      },
       createdAt: now,
       updatedAt: now,
       lastAccessedAt: now,
       accessCount: 0,
     };
     this.records.set(record.id, record);
-    this.enforceLimit(input.scope);
+    this.enforceLimit(input.scope, input.ownerId);
     return record;
   }
 
-  private findByKey(scope: MemoryScope, key: string, sessionId: string | null): MemoryRecord | null {
+  /** Approve a stored long-term memory, making it recallable. */
+  approve(id: string, ownerId: string): MemoryRecord {
+    const record = this.records.get(id);
+    if (!record || record.ownerId !== ownerId) {
+      throw new AlphaPermissionError("memory", `memory "${id}" is not owned by this account`);
+    }
+    record.approved = true;
+    record.updatedAt = Date.now();
+    return record;
+  }
+
+  /** Delete a memory, but only for its owner. */
+  forgetOwned(id: string, ownerId: string): boolean {
+    const record = this.records.get(id);
+    if (!record || record.ownerId !== ownerId) return false;
+    return this.records.delete(id);
+  }
+
+  /** Delete every memory an account owns. */
+  purgeOwner(ownerId: string): number {
+    let removed = 0;
+    for (const [id, record] of this.records) {
+      if (record.ownerId === ownerId) {
+        this.records.delete(id);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  private findByKey(
+    scope: MemoryScope,
+    key: string,
+    sessionId: string | null,
+    ownerId: string,
+  ): MemoryRecord | null {
     for (const record of this.records.values()) {
-      if (record.scope === scope && record.key === key && record.sessionId === sessionId) return record;
+      if (
+        record.ownerId === ownerId &&
+        record.scope === scope &&
+        record.key === key &&
+        record.sessionId === sessionId
+      ) {
+        return record;
+      }
     }
     return null;
   }
 
-  private enforceLimit(scope: MemoryScope): void {
+  private enforceLimit(scope: MemoryScope, ownerId: string): void {
     const scoped = [...this.records.values()]
-      .filter((record) => record.scope === scope)
+      .filter((record) => record.scope === scope && record.ownerId === ownerId)
       .sort((a, b) => a.updatedAt - b.updatedAt);
     while (scoped.length > this.config.maxPerScope) {
       const oldest = scoped.shift();
@@ -171,8 +246,9 @@ export class AlphaMemoryStore {
     return this.records.get(id) ?? null;
   }
 
-  list(options: { scope?: MemoryScope; sessionId?: string } = {}): MemoryRecord[] {
+  list(options: { scope?: MemoryScope; sessionId?: string; ownerId?: string } = {}): MemoryRecord[] {
     return [...this.records.values()]
+      .filter((record) => (options.ownerId ? record.ownerId === options.ownerId : true))
       .filter((record) => (options.scope ? record.scope === options.scope : true))
       .filter((record) =>
         options.sessionId ? record.sessionId === options.sessionId || record.sessionId === null : true,
@@ -214,6 +290,8 @@ export class AlphaMemoryStore {
       minRelevance?: number;
       includeUnapproved?: boolean;
       tags?: string[];
+      /** When present, only this owner's memories are considered. */
+      ownerId?: string;
     } = {},
   ): MemoryRetrieval[] {
     const scopes = options.scopes ?? ["conversation", "session", "long-term"];
@@ -222,6 +300,9 @@ export class AlphaMemoryStore {
     const results: MemoryRetrieval[] = [];
     for (const record of this.records.values()) {
       if (!scopes.includes(record.scope)) continue;
+      // Ownership is checked first: a memory belonging to another account can
+      // never be scored, ranked or returned for this one.
+      if (options.ownerId !== undefined && record.ownerId !== options.ownerId) continue;
       if (!options.includeUnapproved && record.scope === "long-term" && !record.approved) continue;
       if (options.sessionId && record.scope !== "long-term" && record.sessionId !== options.sessionId) {
         continue;
@@ -249,7 +330,7 @@ export class AlphaMemoryStore {
     const lines: string[] = [];
     let used = 0;
     for (const entry of entries) {
-      const line = `- ${entry.record.key}: ${entry.record.content}`;
+      const line = `- ${entry.record.key} (${entry.record.provenance.origin}): ${entry.record.content}`;
       if (used + line.length > maxCharacters) break;
       lines.push(line);
       used += line.length;

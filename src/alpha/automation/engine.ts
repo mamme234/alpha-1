@@ -386,9 +386,11 @@ export class AlphaAutomationEngine {
           scope: action.scope,
           key: action.key,
           content: action.content,
+          ownerId: workflow.actorId,
           approved: action.scope === "long-term" ? action.approved === true : true,
           source: "system",
           sessionId: action.scope === "long-term" ? null : `workflow:${job.id}`,
+          provenance: { origin: "workflow", referenceId: job.id, recordedBy: workflow.actorId },
         });
         return { id: record.id, scope: record.scope };
       }

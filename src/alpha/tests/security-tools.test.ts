@@ -142,6 +142,8 @@ describe("alpha security", () => {
       agentId: "alpha.agent",
       allowedTools: ["alpha.calculator"],
       maxSteps: 1,
+      maxToolCalls: 5,
+      maxIdenticalCalls: 0,
       maxGeneratedTokens: 10,
       maxDurationMs: 60_000,
       allowNetwork: false,
@@ -154,6 +156,8 @@ describe("alpha security", () => {
       agentId: "a",
       allowedTools: ["mcp.tool"],
       maxSteps: 3,
+      maxToolCalls: 5,
+      maxIdenticalCalls: 0,
       maxGeneratedTokens: 10,
       maxDurationMs: 1000,
       allowNetwork: false,
@@ -231,7 +235,7 @@ describe("alpha tool layer", () => {
     const { registry } = buildRegistry();
     const vectorStore = new AlphaVectorStore();
     vectorStore.ensureCollection("docs", 2);
-    vectorStore.insert({ id: "a", collection: "docs", vector: [1, 0], text: "a" });
+    vectorStore.insert({ id: "a", collection: "docs", vector: [1, 0], text: "a", ownerId: "owner" });
     registry.setServices({ vectorStore });
 
     const blocked = await registry.execute("alpha.admin.clear_vector_store", { confirm: true }, { actorId: "owner" });

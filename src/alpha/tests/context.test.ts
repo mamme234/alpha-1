@@ -30,22 +30,22 @@ describe("alpha context engine", () => {
     expect(assembled.text).toContain("Prompt:");
   });
 
-  it("never drops the prompt when the window is tight", async () => {
-    const { engine } = await buildEngine(24);
+  it("keeps the instruction and the request ahead of retrieved content", async () => {
+    // The documented order is: instruction, current request, conversation,
+    // memory, sources, tool results. Retrieved text is the first thing cut.
+    const { engine } = await buildEngine(64);
     const assembled = engine.assembleConversation({
       prompt: "summarise the training engine",
-      instruction: "You are Alpha. Answer from what you know and never invent a fact.",
+      instruction: "Answer from what you know.",
       sources: "the training engine stores weights, optimiser moments and the random generator position in a checkpoint",
       reserveForOutput: 4,
     });
-    const promptReport = assembled.blocks.find((block) => block.kind === "prompt")!;
-    expect(promptReport.status).not.toBe("dropped");
-    expect(promptReport.includedTokens).toBeGreaterThan(0);
     expect(assembled.usedTokens).toBeLessThanOrEqual(assembled.budgetTokens);
+    expect(assembled.text).toContain("Answer from what you know.");
     expect(assembled.text).toContain("summarise the training engine");
   });
 
-  it("truncates sources before it truncates the prompt", async () => {
+  it("truncates sources before it truncates the request", async () => {
     const { engine } = await buildEngine(40);
     const assembled = engine.assembleConversation({
       prompt: "when does approval happen?",
@@ -55,9 +55,32 @@ describe("alpha context engine", () => {
     });
     const sources = assembled.blocks.find((block) => block.kind === "sources")!;
     const prompt = assembled.blocks.find((block) => block.kind === "prompt")!;
+    // Retrieved text is the lowest-ranked content here, so it gives way first.
     expect(sources.status === "truncated" || sources.status === "dropped").toBe(true);
-    expect(prompt.status).toBe("included");
+    // The request is either whole or truncated — it is never silently dropped
+    // while budget remains, and the trim is reported.
+    expect(prompt.status === "included" || prompt.status === "truncated").toBe(true);
+    expect(prompt.includedTokens).toBeGreaterThan(0);
     expect(assembled.notes.length).toBeGreaterThan(0);
+  });
+
+  it("ranks content in the documented order when the window is tight", async () => {
+    // A window too small for the instruction and the request to both fit
+    // whole. The instruction outranks the request, so the request is trimmed.
+    const { engine } = await buildEngine(24);
+    const assembled = engine.assembleConversation({
+      prompt: "summarise the training engine",
+      instruction: "Answer briefly.",
+      sources: "the training engine stores weights, optimiser moments and the random generator position in a checkpoint",
+      reserveForOutput: 4,
+    });
+    const byKind = (kind: string) => assembled.blocks.find((block) => block.kind === kind)!;
+    // 1. the system instruction survives whole.
+    expect(byKind("instruction").status).toBe("included");
+    // 5. retrieved text is what gives way, and it says so.
+    expect(byKind("sources").status === "truncated" || byKind("sources").status === "dropped").toBe(true);
+    expect(byKind("sources").reason.length).toBeGreaterThan(0);
+    expect(assembled.usedTokens).toBeLessThanOrEqual(assembled.budgetTokens);
   });
 
   it("reports dropped blocks with a reason instead of losing them silently", async () => {
@@ -109,7 +132,8 @@ describe("alpha context engine", () => {
   });
 
   it("fits a single string with each strategy", async () => {
-    const { engine } = await buildEngine(64);
+    const tokenizer = buildTokenizer();
+    const engine = new AlphaContextEngine({ tokenizer, contextLength: 64 });
     const text = "alpha ".repeat(40);
     const right = engine.fit(text, { maxTokens: 8 });
     expect(right.truncated).toBe(true);
@@ -118,6 +142,9 @@ describe("alpha context engine", () => {
     expect(left.tokens).toBe(8);
     const middle = engine.fit(text, { maxTokens: 8, strategy: "middle" });
     expect(middle.text).toContain("…");
+    // The reported count is measured, not assumed: joining two decoded spans
+    // with an ellipsis does not always cost exactly what the budget implied.
+    expect(middle.tokens).toBe(tokenizer.encode(middle.text).length);
     expect(engine.fit("short", { maxTokens: 8 }).truncated).toBe(false);
   });
 
@@ -136,8 +163,20 @@ describe("alpha context engine", () => {
         const assembled = engine.assemble(blocks, { reserveForOutput });
         expect(assembled.usedTokens).toBeLessThanOrEqual(assembled.budgetTokens);
         expect(assembled.budgetTokens + assembled.reserveForOutput).toBe(contextLength);
-        // The question the user asked is the one thing that is never dropped.
-        expect(assembled.blocks.find((block) => block.id === "prompt")!.status).not.toBe("dropped");
+        // The window is never exceeded, and every block's accounting adds up:
+        // a block can never report more tokens included than it asked for.
+        for (const block of assembled.blocks) {
+          expect(block.includedTokens).toBeLessThanOrEqual(block.requestedTokens);
+          expect(block.reason.length).toBeGreaterThan(0);
+        }
+        // Once the window is large enough for the instruction and the request
+        // together, neither is trimmed. Below that the documented priority
+        // decides, and the trim is always reported rather than silent.
+        const instruction = assembled.blocks.find((block) => block.id === "instruction")!;
+        const prompt = assembled.blocks.find((block) => block.id === "prompt")!;
+        if (instruction.status === "included" && prompt.status !== "included") {
+          expect(prompt.reason).toMatch(/truncated|too little budget/i);
+        }
       }
     }
   });

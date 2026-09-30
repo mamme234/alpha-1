@@ -39,6 +39,14 @@ export type ToolDescriptor = {
   module: string;
   version: string;
   inputSchema: JsonSchema;
+  /**
+   * Optional output contract. When declared, a handler returning something that
+   * does not match fails the call — a tool cannot quietly change its shape and
+   * feed a malformed result back into the model's context.
+   */
+  outputSchema: JsonSchema | null;
+  /** Wall-clock budget for one call in milliseconds; 0 disables the timeout. */
+  timeoutMs: number;
   permission: AlphaPermission;
   source: ToolSource;
   /** Requires an explicit, recorded human approval before each call. */
@@ -61,6 +69,8 @@ export type ToolExecutionRecord = {
   traceId: string | null;
   /** Set when an approval gate was satisfied. */
   approvalId?: string;
+  /** True when the call was stopped by its timeout. */
+  timedOut?: boolean;
 };
 
 export type ToolRunResult<TOutput = unknown> = {
@@ -79,6 +89,30 @@ export type ToolVerification = {
 
 export type ToolServices = Record<string, unknown>;
 
+/**
+ * Races a handler against a wall-clock budget. Rejects with
+ * `AlphaToolTimeoutError` when the budget is spent, so a hanging tool becomes a
+ * recorded failure rather than a stuck runtime.
+ */
+export async function withToolTimeout<T>(
+  work: T | Promise<T>,
+  toolName: string,
+  timeoutMs: number,
+): Promise<T> {
+  if (!timeoutMs || timeoutMs <= 0) return await work;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(work),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new AlphaToolTimeoutError(toolName, timeoutMs)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export type ToolContext = {
   actorId: string;
   traceId: string | null;
@@ -94,6 +128,10 @@ export type AlphaToolDefinition<TInput = unknown, TOutput = unknown> = {
   module: string;
   version?: string;
   inputSchema: JsonSchema;
+  /** Optional output contract, enforced after the handler returns. */
+  outputSchema?: JsonSchema;
+  /** Wall-clock budget per call. Defaults to 10s; 0 disables the timeout. */
+  timeoutMs?: number;
   permission: AlphaPermission;
   source?: ToolSource;
   requiresApproval?: boolean;
@@ -107,6 +145,20 @@ export type AlphaToolDefinition<TInput = unknown, TOutput = unknown> = {
   verify?: (output: TOutput, input: TInput) => ToolVerification;
   handler: (input: TInput, context: ToolContext) => Promise<TOutput> | TOutput;
 };
+
+/** Default per-call wall-clock budget when a tool does not set one. */
+export const DEFAULT_TOOL_TIMEOUT_MS = 10_000;
+
+/** Raised when a tool exceeds its timeout. Reported, never silently ignored. */
+export class AlphaToolTimeoutError extends AlphaToolError {
+  constructor(toolName: string, timeoutMs: number) {
+    super(`tool "${toolName}" exceeded its ${timeoutMs}ms timeout`, {
+      tool: toolName,
+      timeoutMs,
+    });
+    this.name = "AlphaToolTimeoutError";
+  }
+}
 
 export type ToolRegistryOptions = {
   policy: AlphaPolicyEngine;
@@ -256,7 +308,20 @@ export class AlphaToolRegistry {
         meta: context.meta ?? {},
       };
       const handler = tool.handler as (input: unknown, ctx: ToolContext) => unknown;
-      const output = (await handler(args, handlerContext)) as TOutput;
+      // The handler runs behind a timeout. Alpha is single-threaded JavaScript,
+      // so this cannot preempt a synchronous handler mid-execution, but it does
+      // bound every awaited handler, which is where an unbounded tool would
+      // otherwise hang the runtime.
+      const output = (await withToolTimeout(
+        handler(args, handlerContext),
+        descriptor.name,
+        descriptor.timeoutMs,
+      )) as TOutput;
+      // The output contract is checked before the result is recorded or handed
+      // back, so a malformed result never reaches the model's context.
+      if (descriptor.outputSchema) {
+        assertAgainstSchema(output, descriptor.outputSchema, `${descriptor.name} output`);
+      }
       const record = this.success(
         id,
         descriptor,
@@ -390,6 +455,7 @@ export class AlphaToolRegistry {
       durationMs: Date.now() - startedAt,
       startedAt,
       traceId,
+      ...(error instanceof AlphaToolTimeoutError ? { timedOut: true } : {}),
     };
     this.record(record);
     return {
@@ -427,6 +493,8 @@ export function describeTool(tool: AlphaToolDefinition<never, unknown>): ToolDes
     module: tool.module,
     version: tool.version ?? "0.1.0",
     inputSchema: tool.inputSchema,
+    outputSchema: tool.outputSchema ?? null,
+    timeoutMs: tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
     permission: tool.permission,
     source: tool.source ?? "custom",
     requiresApproval: tool.requiresApproval ?? false,

@@ -272,11 +272,13 @@ export function registerBuiltinTools(registry: AlphaToolRegistry): string[] {
       const record = memory.write({
         key,
         content,
+        ownerId: ctx.actorId,
         scope: scope as MemoryScope,
         sessionId: sessionId ?? null,
         importance,
         approved: scope === "long-term" ? approved === true : true,
         source: "tool",
+        provenance: { origin: "tool:memory.write", referenceId: null, recordedBy: ctx.actorId },
       });
       return {
         id: record.id,

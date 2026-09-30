@@ -35,6 +35,19 @@ import {
   transposeLastTwo,
 } from "../core/tensor";
 import { type AlphaModelConfig, countParameters, validateModelConfig } from "./config";
+import { kvCacheCommit, kvCacheWriteLayer, type KvCache } from "./kv-cache";
+
+/** Options for the cached, incremental inference path. */
+export type CachedForwardOptions = {
+  /**
+   * Cache to read and write. `null` means "prime the cache from scratch": the
+   * whole prompt is processed and every position's keys/values are stored, so
+   * the next call can be a single-token step.
+   */
+  cache: KvCache;
+  /** Reuse keys/values already in the cache and only process these ids. */
+  incremental: boolean;
+};
 
 export type ForwardOptions = {
   /** Enable dropout during training. */
@@ -214,13 +227,19 @@ export class AlphaTransformer {
 
   /** Fixed sinusoidal table, used when positionalEncoding === "sinusoidal". */
   private sinusoidalPositions(seq: number): Tensor {
+    return this.sinusoidalPositionsFrom(0, seq);
+  }
+
+  /** Sinusoidal rows for absolute positions [start, start + seq). */
+  private sinusoidalPositionsFrom(start: number, seq: number): Tensor {
     const c = this.config.dModel;
     const data = new Float32Array(seq * c);
     for (let t = 0; t < seq; t++) {
+      const position = start + t;
       for (let i = 0; i < c; i += 2) {
         const freq = 1 / 10000 ** (i / c);
-        data[t * c + i] = Math.sin(t * freq);
-        if (i + 1 < c) data[t * c + i + 1] = Math.cos(t * freq);
+        data[t * c + i] = Math.sin(position * freq);
+        if (i + 1 < c) data[t * c + i + 1] = Math.cos(position * freq);
       }
     }
     return new Tensor(data, [seq, c], false);
@@ -289,6 +308,197 @@ export class AlphaTransformer {
     const logits3 = linear(finalHidden, this.headWeight(), this.outputBias);
     const logits = reshape(logits3, [batch * seq, this.config.vocabSize]);
     return { logits, batch, seq, hidden: returnHidden ? finalHidden : null };
+  }
+
+  /**
+   * Cached forward pass, used by the inference engine.
+   *
+   * `incremental: false` primes the cache: every prompt position is computed
+   * and its keys/values stored, and the logits of the final position are
+   * returned. `incremental: true` computes only the given ids (normally one),
+   * appends their keys/values, and attends against everything cached — so the
+   * prefix is never recomputed.
+   *
+   * This path records no autograd graph. It is inference-only, and the token
+   * sequence it produces is verified to match `forward` exactly.
+   */
+  forwardCached(
+    ids: Int32Array,
+    batch: number,
+    seq: number,
+    options: CachedForwardOptions,
+  ): ForwardResult {
+    const { cache, incremental } = options;
+    if (batch !== 1) {
+      throw new AlphaValidationError(
+        "model",
+        "forwardCached: the KV cache serves one sequence at a time (batch must be 1)",
+      );
+    }
+    if (incremental && seq > 1) {
+      throw new AlphaValidationError(
+        "model",
+        "forwardCached: an incremental step processes one position at a time",
+      );
+    }
+    const c = this.config.dModel;
+    const nHeads = this.config.nHeads;
+    const headDim = c / nHeads;
+    const attnScale = 1 / Math.sqrt(headDim);
+
+    // The position index this call starts at, which for an incremental step is
+    // the number of positions already cached.
+    const startPosition = incremental ? cache.length : 0;
+    const totalPositions = startPosition + seq;
+    if (totalPositions > this.config.contextLength) {
+      throw new AlphaValidationError(
+        "model",
+        `forwardCached: ${totalPositions} positions exceed the model context length ${this.config.contextLength}`,
+      );
+    }
+
+    let x = this.embedPositions(ids, startPosition, batch, seq);
+    const vocab = this.config.vocabSize;
+
+    for (let l = 0; l < this.layers.length; l++) {
+      const layer = this.layers[l];
+      const normed = layerNorm(x, layer.norm1_w, layer.norm1_b, this.config.normEps);
+      // Q is only needed for the new positions; K and V are needed for the new
+      // positions and then kept.
+      const q = this.project(normed, layer.attn_wq, layer.attn_bq);
+      const k = this.project(normed, layer.attn_wk, layer.attn_bk);
+      const v = this.project(normed, layer.attn_wv, layer.attn_bv);
+
+      // Write this layer's K/V for the new positions before attending over
+      // them, so the row for the current position is already in the cache.
+      for (let t = 0; t < seq; t++) {
+        const offset = t * c;
+        kvCacheWriteLayer(
+          cache,
+          l,
+          startPosition + t,
+          k.data.subarray(offset, offset + c),
+          v.data.subarray(offset, offset + c),
+        );
+      }
+      const attended = this.attendAgainstCache(
+        q,
+        cache.layers[l],
+        seq,
+        startPosition,
+        attnScale,
+      );
+      const attnOut = this.project(attended, layer.attn_wo, layer.attn_bo);
+      x = add(x, reshape(attnOut, [batch, seq, c]));
+
+      const normed2 = layerNorm(x, layer.norm2_w, layer.norm2_b, this.config.normEps);
+      const hidden = gelu(linear(normed2, layer.mlp_w1, layer.mlp_b1));
+      const ffOut = linear(hidden, layer.mlp_w2, layer.mlp_b2);
+      x = add(x, reshape(ffOut, [batch, seq, c]));
+    }
+    // Every layer now holds the new positions, so the length advances once.
+    kvCacheCommit(cache, seq, incremental ? startPosition : 0);
+
+    const finalHidden = layerNorm(x, this.finalNormW, this.finalNormB, this.config.normEps);
+    const logits3 = linear(finalHidden, this.headWeight(), this.outputBias);
+    const logits = reshape(logits3, [batch * seq, vocab]);
+    return { logits, batch, seq, hidden: finalHidden };
+  }
+
+  /** Token + positional signal, with the positional index supplied by the caller. */
+  private embedPositions(ids: Int32Array, startPosition: number, batch: number, seq: number): Tensor {
+    const c = this.config.dModel;
+    let x = reshape(gatherRows(this.tokEmbedding, ids), [batch, seq, c]);
+    if (this.posEmbedding) {
+      const posIdx = new Int32Array(batch * seq);
+      for (let b = 0; b < batch; b++) {
+        for (let t = 0; t < seq; t++) posIdx[b * seq + t] = startPosition + t;
+      }
+      x = add(x, reshape(gatherRows(this.posEmbedding, posIdx), [batch, seq, c]));
+    } else {
+      const table = this.sinusoidalPositionsFrom(startPosition, seq);
+      x = add(x, reshape(table, [seq, c]));
+    }
+    return x;
+  }
+
+  /** A plain matmul projection returning [seq, outFeatures] with no bias folding. */
+  private project(x: Tensor, weight: Tensor, bias: Tensor | null): Tensor {
+    return linear(x, weight, bias);
+  }
+
+  /**
+   * Attention for the new positions against every cached position.
+   *
+   * Causality is implicit: the cache only ever holds positions at or before the
+   * current one, so no mask is needed. Scores are computed in the same order as
+   * the batched path so the arithmetic — and therefore the chosen token —
+   * matches the uncached implementation.
+   */
+  /**
+   * Attention for the new positions against every cached position.
+   *
+   * Causality is implicit: the cache only ever holds positions at or before the
+   * current one, so no mask is needed. The accumulation order and precision
+   * deliberately match `matmul` in `core/tensor` (float32 accumulation, same
+   * index order), so the cached path selects the same token as the batched one
+   * rather than merely a close one.
+   */
+  private attendAgainstCache(
+    q: Tensor,
+    layer: { keys: Float32Array; values: Float32Array },
+    seq: number,
+    startPosition: number,
+    attnScale: number,
+  ): Tensor {
+    const c = this.config.dModel;
+    const nHeads = this.config.nHeads;
+    const headDim = c / nHeads;
+    // Rows are laid out [position, dModel]; read the cached rows directly.
+    const context = new Float32Array(seq * c);
+
+    for (let h = 0; h < nHeads; h++) {
+      const headOffset = h * headDim;
+      for (let t = 0; t < seq; t++) {
+        const qRow = t * c + headOffset;
+        // Causality: this position may attend to itself and everything before
+        // it, never after. When priming a whole prompt the later positions are
+        // already in the cache, so the bound has to be applied explicitly.
+        const visible = startPosition + t + 1;
+        // scores[j] = dot(q_head, k[j]) * scale, accumulated in float32 in the
+        // same order `matmul` would.
+        const scores = new Float32Array(visible);
+        for (let d = 0; d < headDim; d++) {
+          const qv = q.data[qRow + d];
+          if (qv === 0) continue;
+          for (let j = 0; j < visible; j++) {
+            scores[j] += qv * layer.keys[j * c + headOffset + d];
+          }
+        }
+        let max = -Infinity;
+        for (let j = 0; j < visible; j++) {
+          scores[j] *= attnScale;
+          if (scores[j] > max) max = scores[j];
+        }
+        let sum = 0;
+        for (let j = 0; j < visible; j++) {
+          const e = Math.exp(scores[j] - max);
+          scores[j] = e;
+          sum += e;
+        }
+        const inv = sum > 0 ? 1 / sum : 0;
+        for (let j = 0; j < visible; j++) scores[j] *= inv;
+        // context = probs @ values, again matching matmul's order and precision.
+        for (let j = 0; j < visible; j++) {
+          const p = scores[j];
+          if (p === 0) continue;
+          for (let d = 0; d < headDim; d++) {
+            context[t * c + headOffset + d] += p * layer.values[j * c + headOffset + d];
+          }
+        }
+      }
+    }
+    return new Tensor(context, [1, seq, c], false);
   }
 
   /**

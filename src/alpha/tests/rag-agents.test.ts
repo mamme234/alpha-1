@@ -41,11 +41,12 @@ describe("alpha rag pipeline", () => {
       title: "Training notes",
       content:
         "alpha trains with adamw and backpropagation. the optimiser keeps moments so a run can resume. checkpoints store weights and the random generator position.",
+      ownerId: "user_1",
       license: "CC0-1.0",
     });
     expect(ingested.document.chunks).toBeGreaterThan(0);
     expect(pipeline.listDocuments()).toHaveLength(1);
-    const hits = pipeline.retrieve("how does alpha train", { topK: 3 });
+    const hits = pipeline.retrieve("how does alpha train", { topK: 3, ownerId: "user_1" });
     expect(hits.length).toBeGreaterThan(0);
     expect(hits[0].rank).toBe(1);
     expect(hits[0].record.metadata.title).toBe("Training notes");
@@ -56,9 +57,10 @@ describe("alpha rag pipeline", () => {
     pipeline.ingest({
       title: "Memory policy",
       content: "long term memory requires explicit approval before it can be recalled.",
+      ownerId: "user_1",
       license: "CC0-1.0",
     });
-    const answer = pipeline.answer("what does long term memory require", { maxNewTokens: 8 });
+    const answer = pipeline.answer("what does long term memory require", { maxNewTokens: 8 }, { ownerId: "user_1" });
     expect(answer.sources.length).toBeGreaterThan(0);
     expect(answer.sources[0].title).toBe("Memory policy");
     expect(answer.sources[0].excerpt.length).toBeGreaterThan(0);
@@ -68,9 +70,23 @@ describe("alpha rag pipeline", () => {
     expect(answer.answeredWithoutContext).toBe(false);
   });
 
+  it("keeps one account's documents out of another account's retrieval", async () => {
+    const { pipeline } = await buildRagFixture();
+    pipeline.ingest({
+      title: "Private notes",
+      content: "user one keeps a private note about deployments and secrets.",
+      ownerId: "user_1",
+      license: "CC0-1.0",
+    });
+    const mine = pipeline.retrieve("private note", { topK: 5, ownerId: "user_1" });
+    expect(mine.length).toBeGreaterThan(0);
+    const theirs = pipeline.retrieve("private note", { topK: 5, ownerId: "user_2" });
+    expect(theirs).toEqual([]);
+  });
+
   it("says so when there is nothing to retrieve", async () => {
     const { pipeline } = await buildRagFixture();
-    const answer = pipeline.answer("anything at all", { maxNewTokens: 4 });
+    const answer = pipeline.answer("anything at all", { maxNewTokens: 4 }, { ownerId: "user_1" });
     expect(answer.retrieved).toBe(0);
     expect(answer.answeredWithoutContext).toBe(true);
     expect(buildRagPrompt("q", "")).toContain("using only what you know");
@@ -78,7 +94,7 @@ describe("alpha rag pipeline", () => {
 
   it("removes a document and its vectors together", async () => {
     const { pipeline, store } = await buildRagFixture();
-    const { document } = pipeline.ingest({ title: "Temp", content: "temporary content about vectors", license: "CC0-1.0" });
+    const { document } = pipeline.ingest({ title: "Temp", content: "temporary content about vectors", ownerId: "user_1", license: "CC0-1.0" });
     expect(store.count()).toBeGreaterThan(0);
     const removed = pipeline.removeDocument(document.id);
     expect(removed).toBeGreaterThan(0);
