@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "alpha:train": "bun scripts/alpha-train-smoke.ts",
     "alpha:verify": "bun scripts/alpha-train-smoke.ts --verify",
+    "alpha:verify-runtime": "bun scripts/alpha-verify-runtime.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "preview": "vite preview"

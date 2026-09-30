@@ -119,7 +119,10 @@ export class AlphaSandbox {
     args: unknown = null,
   ): void {
     if (this.state.cancelled) {
-      this.deny("sandbox.cancelled", this.state.cancelReason ?? "run cancelled");
+      this.deny(
+        "sandbox.cancelled",
+        `run cancelled: ${this.state.cancelReason ?? "no reason given"}`,
+      );
     }
     if (!this.spec.allowedTools.includes(toolName)) {
       this.deny("sandbox.tool_not_allowed", `tool "${toolName}" is not allowed for agent "${this.spec.agentId}"`);

@@ -27,6 +27,7 @@ import {
   type MemoryScope,
   type RagAnswer,
   type SamplingConfig,
+  type RespondResult,
   type TrainingConfig,
   type TrainingSummary,
   type VerificationReport,
@@ -51,12 +52,19 @@ export type ChatTurn = {
   answer: string;
   result: GenerationResult | null;
   sources: RagAnswer["sources"];
-  mode: "generate" | "rag";
+  mode: "generate" | "rag" | "agent";
   at: number;
   /** Correlation id for this request, stored beside the transcript entry. */
   requestId: string;
   /** Set when this turn failed; the real message, not a placeholder. */
   error?: string | null;
+  /** Which route the orchestrator took for this turn. */
+  route?: string;
+  /** How many memories and tool calls contributed. */
+  memories?: number;
+  toolCalls?: number;
+  /** Whether the answer was backed by a source, memory or tool result. */
+  grounded?: boolean;
 };
 
 /** Anything thrown becomes a printable message for the UI and the transcript. */
@@ -514,6 +522,92 @@ export function useAlpha() {
     [recordTurn],
   );
 
+  /**
+   * Run a turn through the AI runtime.
+   *
+   * This is the full pipeline the orchestrator owns: it decides between plain
+   * inference, memory recall, retrieval, a tool and an agent run, assembles the
+   * context, runs the model, and reports what it did. A failure comes back as
+   * the real error with no answer attached — there is no fallback text.
+   */
+  const respond = useCallback(
+    async (
+      message: string,
+      options: {
+        useRetrieval?: boolean;
+        useMemory?: boolean;
+        useAgent?: boolean;
+        allowedTools?: string[];
+        toolRequest?: { name: string; args?: Record<string, unknown> } | null;
+        conversationId?: string | null;
+        sessionId?: string | null;
+        sampling?: Partial<SamplingConfig>;
+      } = {},
+    ): Promise<RespondResult | null> => {
+      const active = runtime?.workspace;
+      if (!active || !message.trim()) return null;
+      setBusy("generating");
+      setStreaming(null);
+      const id = `turn_${Date.now()}`;
+      try {
+        const result = await active.respond({ message, ...options });
+        const mode: ChatTurn["mode"] = result.agentRun ? "agent" : result.sources.length > 0 ? "rag" : "generate";
+        setTurns((previous) => [
+          {
+            id,
+            requestId: result.requestId,
+            prompt: message,
+            answer: result.response,
+            result: result.generation,
+            sources: result.sources,
+            mode,
+            at: Date.now(),
+            error: result.error?.message ?? null,
+            // The full runtime provenance travels with the turn so a stored
+            // conversation says how it was produced, not just what it said.
+            route: result.route.decision,
+            memories: result.memories.length,
+            toolCalls: result.toolCalls.length,
+            grounded: result.verification.grounded,
+          },
+          ...previous,
+        ]);
+        await recordTurn({
+          requestId: result.requestId,
+          prompt: message,
+          answer: result.response,
+          mode: result.sources.length > 0 ? "rag" : "generate",
+          result: result.generation,
+          sources: result.sources,
+          error: result.error?.message ?? null,
+        });
+        return result;
+      } catch (error) {
+        const message_ = alphaErrorMessage(error);
+        console.error("[alpha] respond failed", error);
+        setTurns((previous) => [
+          {
+            id,
+            requestId: newTraceId(),
+            prompt: message,
+            answer: "",
+            result: null,
+            sources: [],
+            mode: "generate",
+            at: Date.now(),
+            error: message_,
+          },
+          ...previous,
+        ]);
+        return null;
+      } finally {
+        setBusy(null);
+        setSnapshot(active.snapshot());
+      }
+    },
+    [recordTurn],
+  );
+
   const ingest = useCallback(
     async (input: { title: string; content: string; license?: string }): Promise<IngestedDocument | null> =>
       run("ingesting", (ws) => ws.ingestDocument(input)),
@@ -677,6 +771,7 @@ export function useAlpha() {
       resources: snapshot?.resources ?? null,
       alphaErrorMessage,
       generate,
+      respond,
       ingest,
       removeDocument,
       runAgent,
@@ -709,6 +804,7 @@ export function useAlpha() {
       verify,
       measureCorpus,
       generate,
+      respond,
       ingest,
       removeDocument,
       runAgent,

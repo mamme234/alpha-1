@@ -69,6 +69,7 @@ import { AlphaAuditLog } from "./security/audit";
 import { AlphaToolRegistry, type ToolDescriptor, type ToolExecutionRecord } from "./tools/registry";
 import { registerBuiltinTools } from "./tools/builtin";
 import { AlphaAgentRuntime } from "./agents/runtime";
+import { AlphaAiRuntime, type RespondRequest, type RespondResult } from "./runtime/orchestrator";
 import type { AgentRunResult } from "./agents/types";
 import { AlphaAutomationEngine, type AlphaWorkflow, type JobExecution } from "./automation/engine";
 import { AlphaObservability, type ObservabilitySnapshot } from "./observability/index";
@@ -177,6 +178,33 @@ export type AlphaWorkspaceSnapshot = {
     averageLatencyMs: number;
     p95LatencyMs: number;
     last: GenerationResult | null;
+    useCache: boolean;
+    cache: {
+      used: boolean;
+      positions: number;
+      capacity: number;
+      bytes: number;
+      writes: number;
+      hits: number;
+      occupancy: number;
+    };
+  };
+  /** The orchestration layer and the authoritative embedding config. */
+  aiRuntime: {
+    available: boolean;
+    embedding: {
+      config: {
+        version: string;
+        model: string;
+        modelVersion: string;
+        pooling: string;
+        dimension: number;
+        maxTokens: number;
+        normalized: true;
+      };
+      modelStage: string;
+      parameterCount: number;
+    } | null;
   };
   rag: {
     documents: IngestedDocument[];
@@ -614,7 +642,7 @@ export class AlphaWorkspace {
         memory: this.memory,
         rag: this.rag,
         tools: this.tools,
-        agents: this.agents,
+        agents: this.agents ?? undefined,
         policy: this.policy,
         rateLimiter: this.rateLimiter,
         audit: this.audit,
@@ -954,6 +982,63 @@ export class AlphaWorkspace {
         tokenizerFingerprint: checkpoint.tokenizer.fingerprint,
       },
     );
+  }
+
+  /**
+   * Run a request through the AI runtime.
+   *
+   * This is the entry point a conversation uses. It decides between plain
+   * inference, memory recall, retrieval, a tool and an agent run, and returns
+   * the full provenance: what route it took, what context it assembled, what it
+   * cited, what tools ran, and whether the answer is grounded. A failure comes
+   * back as an error on the result — never as invented text.
+   */
+  async respond(request: Omit<RespondRequest, "actorId"> & { actorId?: string }): Promise<RespondResult> {
+    this.requireReady();
+    if (!this.aiRuntime) {
+      throw new AlphaError(
+        "alpha.not_initialised",
+        "inference",
+        "the AI runtime is not available; initialise the workspace first",
+      );
+    }
+    const actorId = request.actorId ?? this.ownerActorId;
+    if (!actorId) {
+      throw new AlphaError("alpha.validation_failed", "inference", "respond() needs an actorId");
+    }
+    const result = await this.aiRuntime.respond({ ...request, actorId });
+    if (result.generation) this.lastGeneration = result.generation;
+    if (result.agentRun) {
+      this.observability.recordAgentRun(result.agentRun);
+    }
+    this.observability.recordInference(
+      result.generation ??
+        ({
+          modelStage: result.modelStage,
+          latencyMs: result.durationMs,
+          generatedTokens: 0,
+          promptTokens: 0,
+          tokensPerSecond: 0,
+          stopReason: "max-tokens",
+        } as unknown as GenerationResult),
+      result.traceId,
+    );
+    void this.persistence?.saveRun?.({
+      kind: "inference",
+      traceId: result.traceId,
+      status: result.error ? "failed" : "succeeded",
+      input: result.message.slice(0, 4000),
+      output: result.response.slice(0, 4000),
+      metrics: {
+        route: result.route.decision,
+        memories: result.memories.length,
+        sources: result.verification.sourceCount,
+        toolCalls: result.toolCalls.length,
+        grounded: result.verification.grounded,
+      },
+      modelStage: result.modelStage ?? "untrained",
+    });
+    return result;
   }
 
   /** One-shot generation through Alpha's own model. */
@@ -1369,6 +1454,22 @@ export class AlphaWorkspace {
         averageLatencyMs: latency?.average ?? 0,
         p95LatencyMs: latency?.p95 ?? 0,
         last: this.lastGeneration,
+        // Whether decoding is running against the KV cache, and the real
+        // counters from the last generation that used it.
+        useCache: this.inference?.useCache ?? false,
+        cache: this.lastGeneration?.cache ?? {
+          used: false,
+          positions: 0,
+          capacity: 0,
+          bytes: 0,
+          writes: 0,
+          hits: 0,
+          occupancy: 0,
+        },
+      },
+      aiRuntime: {
+        available: this.aiRuntime !== null,
+        embedding: this.embedder?.describe() ?? null,
       },
       rag: {
         documents: this.rag?.listDocuments() ?? [],

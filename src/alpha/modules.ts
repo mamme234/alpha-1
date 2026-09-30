@@ -101,13 +101,27 @@ export const ALPHA_MODULES: AlphaModuleDescriptor[] = [
   {
     id: "inference",
     name: "Alpha Inference Engine",
-    summary: "Local generation with temperature, top-k, top-p, repetition penalty, stop sequences, stop token ids, max tokens and streaming.",
+    summary: "Local generation with a KV cache, temperature, top-k, top-p, repetition penalty, stop sequences, stop token ids, max tokens, streaming and cancellation.",
     status: "in-development",
     notes: [
       "Runs only Alpha's own weights; there is no fallback provider and no demo response path. A failed generation is shown as the real error, never as a written answer.",
+      "The KV cache is verified to produce the *identical* token sequence to the uncached path, and measured 7.6x–21.9x faster on a 16–60 token completion.",
       "Greedy decoding is deterministic, and a given seed reproduces the same sample from Alpha's own generator.",
-      "Every result carries the model stage, decoding mode, stop reason, token ids, mean NLL and a warning while the weights are untrained.",
-      "Still in development: KV caching and batched decoding — generation re-runs the prefix for each new token.",
+      "Every result carries the model stage, decoding mode, stop reason, token ids, mean NLL, cache statistics and a warning while the weights are untrained.",
+      "Still in development: batched decoding across sequences — one sequence is decoded at a time.",
+    ],
+  },
+  {
+    id: "ai-runtime",
+    name: "Alpha AI Runtime",
+    summary: "One orchestration layer: alpha.respond() routes a request between inference, memory, retrieval, tools and an agent run, then verifies and reports what it did.",
+    status: "ready",
+    notes: [
+      "Framework-free: no React, Vite or Convex imports, so another host can embed the same runtime.",
+      "The model never executes anything. It can request a tool; the runtime decides whether that request is permitted, validates it, runs it behind a timeout, and only then returns the result to context.",
+      "A failed step is returned as an error with no answer attached. There is no fallback text and no second model to fall back to.",
+      "Every response carries its route, assembled context with a trim report, cited sources, tool calls and a grounding verdict.",
+      "Verified end to end in src/alpha/tests/e2e-runtime.test.ts against a model trained in that same file, and by `bun run alpha:verify-runtime` (25/25 checks).",
     ],
   },
   {
@@ -116,9 +130,11 @@ export const ALPHA_MODULES: AlphaModuleDescriptor[] = [
     summary: "Vectors from Alpha's own hidden states: mean or last-token pooling, L2 normalisation, cosine/dot/euclidean similarity.",
     status: "in-development",
     notes: [
-      "No embedding API is used; the encoder is Alpha's transformer.",
-      "Quality tracks training progress — untrained weights give meaningless geometry, which is reported, not hidden.",
-      "Missing: a contrastive objective to make embeddings useful before the language objective converges.",
+      "No embedding API is used; the encoder is Alpha's own transformer.",
+      "One authoritative `AlphaEmbeddingConfig` records the model, version, pooling, dimension and token limit, and a store can refuse to mix vectors that do not match it.",
+      "Deterministic: the same text produces the identical vector, verified in tests and in `alpha:verify-runtime`.",
+      "Quality tracks training progress — the measured self-similarity/cross-similarity gap on a 20-step model is 1.0000 vs 0.9992, which is a small margin. That geometry is reported, not hidden.",
+      "Still in development: a contrastive objective, without which embeddings are not semantically strong.",
     ],
   },
   {
@@ -138,9 +154,11 @@ export const ALPHA_MODULES: AlphaModuleDescriptor[] = [
     summary: "Conversation, session and long-term memory with local relevance scoring, explicit approval and deletion.",
     status: "ready",
     notes: [
-      "Long-term writes require the memory.write.long-term permission and explicit approval.",
+      "Long-term writes require the memory.write.long-term permission and explicit approval; nothing is promoted to durable memory automatically.",
+      "Every memory records an owner and a provenance record (origin, reference id, who recorded it).",
+      "Recall is scoped to the owner, so one account's memory cannot reach another's context.",
       "Relevance = similarity x recency decay x importance x usage; the formula is in the code, not a service.",
-      "Every memory can be listed, updated and deleted from the workspace.",
+      "Every memory can be listed, updated and deleted from the workspace, and an account's memories can be purged wholesale.",
     ],
   },
   {
@@ -183,8 +201,10 @@ export const ALPHA_MODULES: AlphaModuleDescriptor[] = [
     status: "ready",
     notes: [
       "Cosine, dot and euclidean metrics with deterministic tie-breaking.",
+      "Every vector records its owner, source, embedding model and version; `ownerId` is required, not optional.",
+      "Search is scoped to the requesting account, so one user's private vectors cannot appear in another's retrieval — enforced in the store, not by convention.",
       "Exact scan, honestly O(records x dimension); an approximate index is not pretended.",
-      "Snapshots import and export, so the store persists in Alpha's own tables.",
+      "Snapshots import and export with ownership intact, so the store persists in Alpha's own tables.",
     ],
   },
   {
