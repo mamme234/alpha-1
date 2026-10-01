@@ -188,6 +188,8 @@ export {
   DEFAULT_TRAINING_CONFIG,
   createTrainingConfig,
   type BatchMode,
+  type EarlyStoppingConfig,
+  type EarlyStoppingReport,
   type EvaluationResult,
   type TrainerOptions,
   type TrainingConfig,
@@ -608,6 +610,172 @@ export {
   type ExportModelInput,
   type ImportResult,
 } from "./model/export";
+
+// --- step 5: provenance, corpus, mixture, splits --------------------------
+export {
+  ACQUISITION_LOCATIONS,
+  ALPHA_MIX_CATEGORIES,
+  PROVENANCE_ORIGINS,
+  assertProvenance,
+  categoryCounts,
+  createProvenanceDocument,
+  describeProvenance,
+  documentFingerprint,
+  languageCounts,
+  provenanceFingerprint,
+  sourceCounts,
+  validateProvenance,
+  withSourceCounts,
+  type AcquisitionLocation,
+  type AcquisitionMethod,
+  type AcquisitionRecord,
+  type MixCategory,
+  type ProvenanceCorpus,
+  type ProvenanceDocument,
+  type ProvenanceIssue,
+  type ProvenanceOrigin,
+  type ProvenanceSource,
+  type ProvenanceValidation,
+} from "./datasets/provenance";
+export {
+  authoredCategories,
+  buildAuthoredCorpus,
+  multilingualSamples,
+  type AuthoredDocument,
+} from "./datasets/authored-corpus";
+export {
+  analyseDiversity,
+  compareDiversity,
+  splitSentences,
+  summariseDiversity,
+  words,
+  type DiversityDelta,
+  type DiversityOptions,
+  type DiversityReport,
+} from "./datasets/diversity";
+export {
+  buildMixture,
+  describeMixture,
+  type MixtureComponent,
+  type MixtureInput,
+  type MixtureRecord,
+  type MixtureResult,
+} from "./datasets/mixture";
+export {
+  INSTRUCTION_SKILLS,
+  assertNoInstructionLeakage,
+  assertValidInstructionDataset,
+  createInstructionDataset,
+  createInstructionExample,
+  detectInstructionLeakage,
+  instructionDocuments,
+  instructionFingerprint,
+  renderInstructionExample,
+  renderInstructionPrompt,
+  summariseInstructionDataset,
+  validateInstructionDataset,
+  type CreateInstructionExampleInput,
+  type InstructionDataset,
+  type InstructionExample,
+  type InstructionIssue,
+  type InstructionSkill,
+  type InstructionValidation,
+  type LeakageReport,
+} from "./datasets/instructions";
+export {
+  assertNoSplitLeakage,
+  assignSplits,
+  auditSplitOverlap,
+  detectOverlap,
+  describeSplits,
+  nearDuplicateGroupKey,
+  repairSplitLeakage,
+  shingleFingerprints,
+  splitDocuments as splitProvenanceDocuments,
+  type OverlapOptions,
+  type OverlapReport,
+  type SplitAssignment,
+  type SplitName,
+  type SplitOptions,
+} from "./datasets/splits";
+
+// --- step 5: tokenizer measurement -----------------------------------------
+export {
+  DEFAULT_TOKENIZER_DECISION_THRESHOLDS,
+  decideTokenizerChange,
+  measureTokenizer,
+  summariseTokenizerDecision,
+  summariseTokenizerMeasurement,
+  type TokenizerDecision,
+  type TokenizerDecisionReason,
+  type TokenizerDecisionThresholds,
+  type TokenizerMeasurement,
+} from "./tokenizer/analysis";
+
+// --- step 5: expanded evaluation --------------------------------------------
+export {
+  ALPHA_EVAL_SUITE_VERSION,
+  EVAL_CATEGORIES,
+  assertSuiteFrozen,
+  assertSuiteNotInTraining,
+  auditSuiteLeakage,
+  caseWords,
+  createEvalSuite,
+  describeEvalSuite,
+  populatedCategories,
+  suiteFingerprint,
+  type EvalCase,
+  type EvalCategory,
+  type EvalSplit,
+  type EvalSuite,
+  type FormatRequirement,
+  type SuiteLeakageReport,
+} from "./evaluation/suite";
+export {
+  DEFAULT_EVAL_GENERATION_TOKENS,
+  categoryReport,
+  checkFormat,
+  generations,
+  languageModelingMetrics,
+  runEvalSuite,
+  summariseCapabilityReport,
+  type CapabilityReport,
+  type CategoryReport,
+  type EvalCaseResult,
+  type RunSuiteOptions,
+} from "./evaluation/runner";
+export {
+  CAPABILITY_GATE_CRITERIA,
+  GATE_REQUIRED_PASSES,
+  assertGateStable,
+  describeGate,
+  evaluateGate,
+  gateFingerprint,
+  type GateCriterion,
+  type GateCriterionResult,
+  type GateDirection,
+  type GateEvaluation,
+} from "./evaluation/gate";
+
+// --- step 5: experiment tracking --------------------------------------------
+export {
+  EXPERIMENT_STATUSES,
+  abortExperiment,
+  completeExperiment,
+  compareCapability,
+  createExperiment,
+  describeComparison,
+  describeReproduction,
+  failExperiment,
+  recordCapability,
+  recordTraining,
+  summariseExperiment,
+  type CapabilityComparisonRow,
+  type CreateExperimentInput,
+  type Experiment,
+  type ExperimentMeasurements,
+  type ExperimentStatus,
+} from "./training/experiments";
 
 // --- manifest + workspace ---------------------------------------------------
 export { ALPHA_MODULES, moduleById, moduleStatusCounts } from "./modules";

@@ -501,9 +501,18 @@ export function runEvalSuite(
   const results: EvalCaseResult[] = [];
 
   for (const evalCase of suite.cases) {
-    const generation: GenerationResult = engine.generate(evalCase.prompt, sampling);
-    const generated = generation.text;
-    const generatedTokens = generation.tokenIds;
+    // Language-modelling cases carry a whole held-out document as their prompt.
+    // Generating from one would produce text nobody reads and cost a forward
+    // pass per token, while its real measurement — cross entropy and next-token
+    // accuracy over that document — is computed once for the whole set below.
+    // Skipping the generation is both faster and more honest: there is no
+    // "generated" field to report for a case that was never asked to generate.
+    const isLanguageModeling = evalCase.category === "language-modeling";
+    const generation: GenerationResult | null = isLanguageModeling
+      ? null
+      : engine.generate(evalCase.prompt, sampling);
+    const generated = generation?.text ?? "";
+    const generatedTokens = generation?.tokenIds ?? [];
 
     const expect =
       evalCase.expect && evalCase.expect.length > 0
@@ -521,9 +530,13 @@ export function runEvalSuite(
       ? checkFormat(generated, evalCase.format).details
       : [];
 
-    const scoring = evalCase.continuation
-      ? continuationScoring(model, tokenizer, evalCase.prompt, evalCase.continuation)
-      : null;
+    // Continuation scoring is skipped for language-modelling cases: scoring a
+    // document against itself would double-count what `languageModelingMetrics`
+    // already measures over every held-out document.
+    const scoring =
+      evalCase.continuation && !isLanguageModeling
+        ? continuationScoring(model, tokenizer, evalCase.prompt, evalCase.continuation)
+        : null;
 
     // Entity-confusion detection: the suite records what the answer must not be.
     const confusable = CONFUSABLE.get(evalCase.id);
@@ -538,8 +551,8 @@ export function runEvalSuite(
       prompt: evalCase.prompt,
       expected: evalCase.continuation ?? null,
       generated,
-      generatedTokens: generation.generatedTokens,
-      stopReason: generation.stopReason,
+      generatedTokens: generation?.generatedTokens ?? 0,
+      stopReason: generation?.stopReason ?? "not-applicable",
       expect,
       matched,
       formatPassed,
@@ -552,7 +565,7 @@ export function runEvalSuite(
       distinctTrigramRatio: distinctTrigramRatio(generated),
       confusedWith: confusable ?? null,
       confused,
-      latencyMs: generation.latencyMs,
+      latencyMs: generation?.latencyMs ?? 0,
     });
   }
 
