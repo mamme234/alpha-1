@@ -206,7 +206,12 @@ export function repairSplitLeakage(
   assignment: SplitAssignment<ProvenanceDocument>,
   options: { documents: ProvenanceDocument[]; contaminationThreshold?: number; shingleSize?: number },
 ): SplitAssignment<ProvenanceDocument> {
-  const threshold = options.contaminationThreshold ?? 0.5;
+  // Deliberately stricter than the audit threshold in `detectOverlap` (0.5).
+  // A document at 0.48 would otherwise survive repair and sit right at the
+  // audit's limit; repairing at a lower bar keeps the audit away from its own
+  // threshold, so a passing held-out set is comfortably clean rather than
+  // borderline.
+  const threshold = options.contaminationThreshold ?? 0.4;
   const shingleSize = options.shingleSize ?? 8;
   const contaminated = (candidate: ProvenanceDocument, reference: ProvenanceDocument[]): boolean => {
     const referenceShingles = new Set<string>();

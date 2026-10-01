@@ -485,7 +485,7 @@ export function runEvalSuite(
   assertSuiteFrozen(suite, options.expectedFingerprint);
   if (options.heldOutDocuments.length === 0) {
     throw new AlphaValidationError(
-      "evaluation",
+      "model",
       "language-modeling measurement needs at least one held-out document; an empty set cannot produce a loss",
     );
   }
@@ -668,7 +668,7 @@ const CONFUSABLE: Map<string, string> = new Map([
 export function categoryReport(report: CapabilityReport, category: EvalCategory): CategoryReport {
   const found = report.categories.find((c) => c.category === category);
   if (!found) {
-    throw new AlphaValidationError("evaluation", `no report for category ${category}`);
+    throw new AlphaValidationError("model", `no report for category ${category}`);
   }
   return found;
 }

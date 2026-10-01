@@ -101,6 +101,14 @@ export type EvalCase = {
 /** A short passage used for summarization and context cases, authored here. */
 type SourcePassage = { id: string; text: string };
 
+/** A context-retention passage: it must also name what to ask and the answer. */
+type ContextPassage = SourcePassage & {
+  question: string;
+  answer: string;
+  /** Additional phrases that must appear in a passing answer. */
+  alsoExpected: string[];
+};
+
 /**
  * Source passages for summarization and context cases. Authored for this suite
  * and audited against the training corpus by `assertSuiteNotInTraining`.
@@ -124,7 +132,7 @@ const SUMMARIZATION_PASSAGES: SourcePassage[] = [
   },
 ];
 
-const CONTEXT_PASSAGES: SourcePassage[] = [
+const CONTEXT_PASSAGES: ContextPassage[] = [
   {
     id: "ctx-1",
     text: "The harbour office was run by a woman named Ilse Branning, who had taken the post from her uncle in the spring of 1961. She kept the tide tables in a wooden box on the left of her desk. The box was painted a dull green, and it was the only thing in the office that anyone ever painted.",
@@ -298,9 +306,12 @@ function completionCases(): EvalCase[] {
       id: "comp-5",
       category: "completion",
       split: "held-out",
-      prompt: "1. Fix the seed before the first step. 2.",
-      continuation: "Record the dataset version and its fingerprint.",
-      measures: "continuation of an ordered list with the expected marker convention",
+      // Deliberately not drawn from the corpus: the instruction category in the
+      // training data lists software-engineering steps, so a continuation from
+      // an unrelated domain is genuinely held out rather than coincidentally so.
+      prompt: "1. Boil the water and let it cool slightly. 2.",
+      continuation: "Pour the water slowly over the leaves and wait four minutes.",
+      measures: "continuation of an ordered list with the expected marker convention, on a domain absent from training",
       language: "en",
     },
     {
@@ -431,6 +442,64 @@ function structuredCases(): EvalCase[] {
         'Instruction: Return a JSON object with keys "term" and "definition", both strings.\nContext: The term used throughout is attention.\nResponse:',
       format: { json: { keys: ["term", "definition"] } },
       measures: "producing a parsable object on material the model may have seen",
+      language: "en",
+    },
+  ];
+}
+
+function generationQualityCases(): EvalCase[] {
+  // These cases exist to expose degenerate generation. They ask for output
+  // longer than a single sentence, because repetition loops and premature
+  // truncation do not appear in short replies.
+  return [
+    {
+      id: "gen-1",
+      category: "generation-quality",
+      split: "held-out",
+      prompt:
+        "Write three sentences describing a room you have never been in before. Begin: The room was",
+      format: { minCharacters: 60, maxCharacters: 600 },
+      measures:
+        "sustained generation over several sentences: repetition, longest token run and distinct 3-gram ratio",
+      language: "en",
+    },
+    {
+      id: "gen-2",
+      category: "generation-quality",
+      split: "held-out",
+      prompt:
+        "List five objects that might be found on a workshop bench, one per line.",
+      format: { minCharacters: 40, maxCharacters: 600 },
+      measures: "enumeration without collapsing into a loop of a single repeated item",
+      language: "en",
+    },
+    {
+      id: "gen-3",
+      category: "generation-quality",
+      split: "held-out",
+      prompt:
+        "Continue this paragraph for four more sentences.\n\nThe tide came in slowly and",
+      format: { minCharacters: 80, maxCharacters: 900 },
+      measures:
+        "whether generation stops on its own or runs to the token cap, and whether it degenerates",
+      language: "en",
+    },
+    {
+      id: "gen-4",
+      category: "generation-quality",
+      split: "held-out",
+      prompt:
+        "Answer this in two sentences: what is the difference between validation loss and test loss?",
+      format: { minCharacters: 30, maxCharacters: 500 },
+      measures: "stop behaviour: whether generation terminates before the token cap",
+      language: "en",
+    },
+    {
+      id: "gen-5",
+      category: "generation-quality",
+      split: "known",
+      prompt: "Continue this definition: perplexity is",
+      measures: "repetition behaviour on material the model may have trained on",
       language: "en",
     },
   ];
@@ -581,6 +650,7 @@ export function createEvalSuite(options: {
     ...qaCases(),
     ...summarizationCases(),
     ...structuredCases(),
+    ...generationQualityCases(),
     ...contextRetentionCases(),
   ];
 
@@ -613,7 +683,7 @@ export function createEvalSuite(options: {
 export function assertSuiteFrozen(suite: EvalSuite, expectedFingerprint?: string): { ok: true } {
   if (suite.frozenAt === 0) {
     throw new AlphaValidationError(
-      "evaluation",
+      "model",
       `evaluation suite "${suite.name}" is not frozen; it must be frozen before any model is measured against it`,
       { suite: suite.name, version: suite.version },
     );
@@ -621,7 +691,7 @@ export function assertSuiteFrozen(suite: EvalSuite, expectedFingerprint?: string
   const actual = suiteFingerprint(suite.cases);
   if (actual !== suite.fingerprint) {
     throw new AlphaValidationError(
-      "evaluation",
+      "model",
       `evaluation suite "${suite.name}@${suite.version}" was edited after it was frozen: ` +
         `recorded fingerprint ${suite.fingerprint}, current content hashes to ${actual}`,
       { expected: suite.fingerprint, actual },
@@ -629,7 +699,7 @@ export function assertSuiteFrozen(suite: EvalSuite, expectedFingerprint?: string
   }
   if (expectedFingerprint && expectedFingerprint !== suite.fingerprint) {
     throw new AlphaValidationError(
-      "evaluation",
+      "model",
       `this evaluation used suite ${suite.fingerprint}, but the gate expects ${expectedFingerprint}; ` +
         "the two runs are not comparable",
       { expected: expectedFingerprint, actual: suite.fingerprint },
@@ -718,7 +788,7 @@ export function assertSuiteNotInTraining(
   const report = auditSuiteLeakage(suite, trainingDocuments, options);
   if (!report.clean) {
     throw new AlphaValidationError(
-      "evaluation",
+      "model",
       `refusing to evaluate: the suite overlaps its own training data — ${report.summary}`,
       { contaminated: report.contaminated },
     );
