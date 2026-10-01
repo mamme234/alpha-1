@@ -26,15 +26,23 @@ const BYTES_PER_FLOAT = 4;
 
 /**
  * What this runtime can genuinely do. Each entry is a *measured* statement
- * about the code, not an aspiration.
+ * about the code, not an aspiration — Step 5 only turned any of these to `true`
+ * after a numerical test proved the behaviour.
  */
 export const RUNTIME_CAPABILITIES = {
   /** Alpha's tensors are float32 throughout; there is no mixed-precision path. */
   mixedPrecision: false,
-  /** The trainer applies gradients once per batch; there is no accumulation loop. */
-  gradientAccumulation: false,
-  /** The training loop runs until totalSteps; there is no early-stopping rule. */
-  earlyStopping: false,
+  /**
+   * `AlphaTrainer.accumulateGradients` sums the token-weighted gradient of
+   * several micro-batches and applies exactly one optimiser update, verified
+   * against a single pass over the concatenated batch.
+   */
+  gradientAccumulation: true,
+  /**
+   * The training loop can stop on a measured validation metric, recording the
+   * monitored metric, patience, best value, best step and stopping reason.
+   */
+  earlyStopping: true,
   /** A paused run writes a checkpoint and can be reloaded by a new trainer. */
   resumable: true,
   /** Validation runs on a held-out fraction carved from the corpus. */

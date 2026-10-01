@@ -643,10 +643,15 @@ describe("step 4 — training scaling, metrics and lifecycle", () => {
     );
   });
 
-  it("does not claim features the runtime does not implement", () => {
+  it("declares only what the runtime actually implements", () => {
+    // The Step 4 assertion was that gradient accumulation and early stopping
+    // were false. Step 5 implemented both and verified them numerically
+    // (see step5-capability.test.ts), so they are now true. Mixed precision is
+    // still not implemented: Alpha's tensors are float32 and there is no
+    // half-precision path, so it stays false rather than being simulated.
     expect(RUNTIME_CAPABILITIES.mixedPrecision).toBe(false);
-    expect(RUNTIME_CAPABILITIES.gradientAccumulation).toBe(false);
-    expect(RUNTIME_CAPABILITIES.earlyStopping).toBe(false);
+    expect(RUNTIME_CAPABILITIES.gradientAccumulation).toBe(true);
+    expect(RUNTIME_CAPABILITIES.earlyStopping).toBe(true);
     expect(RUNTIME_CAPABILITIES.resumable).toBe(true);
   });
 

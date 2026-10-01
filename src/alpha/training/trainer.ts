@@ -20,7 +20,7 @@
 import { AlphaRng } from "../core/rng";
 import { AlphaValidationError } from "../core/errors";
 import { assertResourceLimit } from "../core/limits";
-import { backward, crossEntropy, setGradEnabled } from "../core/tensor";
+import { backward, crossEntropy, scale, setGradEnabled, type Tensor } from "../core/tensor";
 import type { AlphaTokenizer } from "../tokenizer/bpe";
 import { assertValidDataset, datasetFingerprint, type AlphaDataset } from "../datasets/types";
 import {
@@ -48,6 +48,50 @@ import type { AlphaTrainingJob, TrainingJobState } from "./job";
 
 export type BatchMode = "windows" | "documents";
 
+/**
+ * Early-stopping rule, evaluated on a *measured validation* metric rather than
+ * on a step count. Serializable, because a resumed run must continue monitoring
+ * exactly the thing it was monitoring.
+ */
+export type EarlyStoppingConfig = {
+  /** Which measured quantity is watched. Both loss and perplexity are lower-is-better. */
+  monitor: "validationLoss" | "validationPerplexity";
+  /**
+   * How many consecutive evaluations without an improvement of at least
+   * `minDelta` are tolerated before the run stops.
+   */
+  patience: number;
+  /** An improvement smaller than this does not count as an improvement. */
+  minDelta: number;
+  /** Never stop before this many optimiser steps, however bad the curve looks. */
+  minSteps: number;
+  /**
+   * How often the monitored metric is evaluated. 0 reuses `evalInterval`.
+   * Early stopping needs its own cadence: with a long `evalInterval` the
+   * patience counter would only ever be decremented a handful of times.
+   */
+  evalEvery: number;
+};
+
+/** The record of what early stopping did, or that it did nothing. */
+export type EarlyStoppingReport = {
+  monitor: "validationLoss" | "validationPerplexity";
+  patience: number;
+  minDelta: number;
+  minSteps: number;
+  /** Best monitored value seen, in the metric's own units. */
+  bestValue: number | null;
+  /** Optimiser step at which that best value was recorded. */
+  bestStep: number | null;
+  /** How many evaluations have been made. */
+  evaluations: number;
+  /** Consecutive evaluations without a qualifying improvement. */
+  evaluationsSinceImprovement: number;
+  stoppedEarly: boolean;
+  /** Why the run ended, in words, whatever the outcome. */
+  stoppingReason: string;
+};
+
 export type TrainingConfig = {
   batchSize: number;
   seqLen: number;
@@ -72,6 +116,16 @@ export type TrainingConfig = {
    * out of the loss.
    */
   batchMode: BatchMode;
+  /**
+   * Number of micro-batches whose gradients are summed into one optimiser
+   * update. 1 means one micro-batch per update, which is the Step 1-4
+   * behaviour exactly. Greater than 1 gives an effective batch of
+   * `batchSize * gradientAccumulationSteps` rows without holding that many rows
+   * of activations at once.
+   */
+  gradientAccumulationSteps: number;
+  /** Early-stopping rule, or null to train for the full step budget. */
+  earlyStopping: EarlyStoppingConfig | null;
 };
 
 export const DEFAULT_TRAINING_CONFIG: TrainingConfig = {
@@ -90,6 +144,8 @@ export const DEFAULT_TRAINING_CONFIG: TrainingConfig = {
   seed: 1337,
   checkpointInterval: 60,
   batchMode: "windows",
+  gradientAccumulationSteps: 1,
+  earlyStopping: null,
 };
 
 export function createTrainingConfig(input: Partial<TrainingConfig> = {}): TrainingConfig {
@@ -111,6 +167,51 @@ export function createTrainingConfig(input: Partial<TrainingConfig> = {}): Train
   }
   if (config.batchMode !== "windows" && config.batchMode !== "documents") {
     throw new AlphaValidationError("training", `unknown batchMode ${String(config.batchMode)}`);
+  }
+  if (
+    !Number.isInteger(config.gradientAccumulationSteps) ||
+    config.gradientAccumulationSteps < 1
+  ) {
+    throw new AlphaValidationError(
+      "training",
+      "gradientAccumulationSteps must be a positive integer",
+    );
+  }
+  if (config.earlyStopping) {
+    const early = config.earlyStopping;
+    if (early.monitor !== "validationLoss" && early.monitor !== "validationPerplexity") {
+      throw new AlphaValidationError(
+        "training",
+        `earlyStopping.monitor must be validationLoss or validationPerplexity, not ${String(early.monitor)}`,
+      );
+    }
+    if (!Number.isInteger(early.patience) || early.patience < 1) {
+      throw new AlphaValidationError("training", "earlyStopping.patience must be a positive integer");
+    }
+    if (!Number.isFinite(early.minDelta) || early.minDelta < 0) {
+      throw new AlphaValidationError(
+        "training",
+        "earlyStopping.minDelta must be a non-negative number",
+      );
+    }
+    if (!Number.isInteger(early.minSteps) || early.minSteps < 1) {
+      throw new AlphaValidationError(
+        "training",
+        "earlyStopping.minSteps must be a positive integer",
+      );
+    }
+    if (early.minSteps > config.totalSteps) {
+      throw new AlphaValidationError(
+        "training",
+        `earlyStopping.minSteps ${early.minSteps} exceeds totalSteps ${config.totalSteps}; the run could never stop early`,
+      );
+    }
+    if (!Number.isInteger(early.evalEvery) || early.evalEvery < 0) {
+      throw new AlphaValidationError(
+        "training",
+        "earlyStopping.evalEvery must be 0 (reuse evalInterval) or a positive integer",
+      );
+    }
   }
   // Resource safety: refuse a configuration that would exhaust the host.
   assertResourceLimit("maxBatchSize", config.batchSize, "training config");
@@ -160,6 +261,18 @@ export type TrainingSummary = {
   checkpoint: AlphaCheckpoint | null;
   checkpointCount: number;
   corpus: CorpusStats;
+  /**
+   * What early stopping did. Present whenever a rule was configured, including
+   * when it never fired — "monitored and did not fire" is a result, and saying
+   * so is different from saying nothing happened.
+   */
+  earlyStopping: EarlyStoppingReport | null;
+  /** Micro-batches whose gradients were summed per optimiser step. */
+  gradientAccumulationSteps: number;
+  /** Tokens the single update in a step was computed from. */
+  tokensPerStep: number;
+  /** Optimiser steps the run would have taken without early stopping. */
+  stepsSkippedByEarlyStopping: number;
 };
 
 export type TrainingEvent =
@@ -217,6 +330,7 @@ export class AlphaTrainer {
   private stepCount = 0;
   private startedAt = 0;
   private latestCheckpoint: AlphaCheckpoint | null = null;
+  private earlyStopping: EarlyStoppingReport;
 
   constructor(options: TrainerOptions) {
     this.model = options.model;
@@ -265,6 +379,33 @@ export class AlphaTrainer {
       totalSteps: this.config.totalSteps,
       minFactor: this.config.minFactor,
     };
+    const early = this.config.earlyStopping;
+    this.earlyStopping = {
+      monitor: early?.monitor ?? "validationLoss",
+      patience: early?.patience ?? 0,
+      minDelta: early?.minDelta ?? 0,
+      minSteps: early?.minSteps ?? 0,
+      bestValue: null,
+      bestStep: null,
+      evaluations: 0,
+      evaluationsSinceImprovement: 0,
+      stoppedEarly: false,
+      stoppingReason: early
+        ? "not yet evaluated"
+        : "no early-stopping rule configured for this run",
+    };
+  }
+
+  /** The early-stopping state as it currently stands. */
+  get earlyStoppingReport(): EarlyStoppingReport {
+    return { ...this.earlyStopping };
+  }
+
+  /** How often the monitored metric is evaluated, resolved against evalInterval. */
+  private get earlyStopInterval(): number {
+    const early = this.config.earlyStopping;
+    if (!early) return 0;
+    return early.evalEvery > 0 ? early.evalEvery : this.config.evalInterval;
   }
 
   private buildSampler(ids: Int32Array, documents: Int32Array[], seed: number): Sampler {
@@ -292,12 +433,18 @@ export class AlphaTrainer {
   }
 
   get tokensSeen(): number {
-    return this.stepCount * this.config.batchSize * this.config.seqLen;
+    return this.stepCount * this.tokensPerStep;
   }
 
-  /** Tokens in one optimiser step — the throughput denominator. */
+  /**
+   * Tokens in one optimiser step — the throughput denominator.
+   *
+   * With gradient accumulation this is the *effective* batch: every
+   * micro-batch in an accumulation group contributes its tokens, because the
+   * single optimiser update they produce was computed from all of them.
+   */
   get tokensPerStep(): number {
-    return this.config.batchSize * this.config.seqLen;
+    return this.config.batchSize * this.config.seqLen * this.config.gradientAccumulationSteps;
   }
 
   /** Cross-entropy of a uniform predictor — the honest "no learning" baseline. */
@@ -333,32 +480,156 @@ export class AlphaTrainer {
     };
   }
 
-  /** One optimiser step: forward, loss, backward, clip, update. */
+  /**
+   * Forward and backward over a group of micro-batches, accumulating one
+   * gradient without applying any optimiser update.
+   *
+   * This is the whole of gradient accumulation, isolated from the training loop
+   * so it can be verified numerically: pass explicit batches and compare the
+   * resulting gradient against a single forward/backward over their
+   * concatenation. The gradient left on the parameters is the *token-weighted
+   * mean* over the group, which is what makes it equivalent to training on the
+   * concatenated batch — token weighting matters because document-mode
+   * micro-batches carry different numbers of unpadded targets.
+   *
+   * Gradients are zeroed first and left accumulated afterwards; the caller
+   * decides when to step and when to clear.
+   */
+  accumulateGradients(
+    batches: TrainingBatch[],
+  ): { gradNorm: number; meanLoss: number; tokens: number; batches: number } {
+    if (batches.length === 0) {
+      throw new AlphaValidationError("training", "accumulateGradients needs at least one batch");
+    }
+    const results: Array<{ tensor: Tensor; loss: number; tokens: number }> = [];
+    for (const batch of batches) {
+      const forward = this.model.forward(batch.input, batch.batch, batch.seqLen, {
+        training: true,
+        rng: this.rng,
+      });
+      const result = crossEntropy(forward.logits, batch.target, this.tokenizer.padId);
+      results.push({ tensor: result.tensor, loss: result.loss, tokens: result.tokens });
+    }
+
+    const totalTokens = results.reduce((sum, r) => sum + r.tokens, 0);
+    if (totalTokens === 0) {
+      throw new AlphaValidationError(
+        "training",
+        "a gradient accumulation group contained no loss-bearing tokens; the batch configuration cannot produce a training signal",
+      );
+    }
+
+    this.optimizer.zeroGrad();
+    for (const result of results) {
+      backward(scale(result.tensor, result.tokens / totalTokens));
+    }
+
+    return {
+      gradNorm: this.optimizer.gradNorm(),
+      meanLoss: results.reduce((sum, r) => sum + r.loss, 0) / results.length,
+      tokens: totalTokens,
+      batches: batches.length,
+    };
+  }
+
+  /**
+   * One optimiser step: forward, loss, backward, clip, update.
+   *
+   * With `gradientAccumulationSteps > 1` this runs that many micro-batches,
+   * accumulates their gradients, and takes exactly one optimiser step.
+   */
   private trainStep(): TrainingMetricPoint {
-    const batch = this.sampler.next();
     const lr = learningRateAt(this.stepCount + 1, this.schedule);
-    const forward = this.model.forward(batch.input, batch.batch, batch.seqLen, {
-      training: true,
-      rng: this.rng,
-    });
-    const result = crossEntropy(forward.logits, batch.target, this.tokenizer.padId);
-    backward(result.tensor);
+    const accumulation: TrainingBatch[] = [];
+    for (let i = 0; i < this.config.gradientAccumulationSteps; i++) {
+      accumulation.push(this.sampler.next());
+    }
+
+    const accumulated = this.accumulateGradients(accumulation);
     const report = this.optimizer.stepWithSchedule(lr);
     this.optimizer.zeroGrad();
     this.stepCount = report.step;
+
+    const loss = accumulated.meanLoss;
     const point: TrainingMetricPoint = {
       step: this.stepCount,
-      loss: result.loss,
-      perplexity: result.perplexity,
+      loss,
+      perplexity: Math.exp(Math.min(loss, 20)),
       learningRate: report.learningRate,
       gradNorm: report.gradNorm,
       updateNorm: report.updateNorm,
       tokensSeen: this.tokensSeen,
-      paddingTokens: batch.paddingTokens,
+      paddingTokens: accumulation.reduce((sum, b) => sum + b.paddingTokens, 0),
       elapsedMs: Date.now() - this.startedAt,
     };
     this.history.push(point);
     return point;
+  }
+
+  /**
+   * Evaluate the early-stopping monitor without applying any of its decisions.
+   *
+   * Exposed so a caller (and the tests) can see what the rule *would* decide
+   * from a given validation result, rather than inferring it from a run.
+   */
+  earlyStopDecision(evaluation: EvaluationResult): {
+    value: number | null;
+    improved: boolean;
+    shouldStop: boolean;
+    reason: string;
+  } {
+    const early = this.config.earlyStopping;
+    if (!early) {
+      return { value: null, improved: false, shouldStop: false, reason: "no early-stopping rule configured" };
+    }
+    const value =
+      early.monitor === "validationLoss" ? evaluation.loss : evaluation.perplexity;
+    if (!Number.isFinite(value)) {
+      return {
+        value: null,
+        improved: false,
+        shouldStop: false,
+        reason: `the monitored metric ${early.monitor} was not finite at step ${evaluation.step}, so it was not used`,
+      };
+    }
+    const previousBest = this.earlyStopping.bestValue;
+    const improved =
+      previousBest === null || value < previousBest - early.minDelta;
+    return {
+      value,
+      improved,
+      shouldStop: false,
+      reason: improved
+        ? `step ${evaluation.step}: ${early.monitor} ${value.toFixed(4)} improved on ${previousBest === null ? "the first measurement" : previousBest.toFixed(4)}`
+        : `step ${evaluation.step}: ${early.monitor} ${value.toFixed(4)} did not improve on ${(previousBest ?? value).toFixed(4)} (minDelta ${early.minDelta})`,
+    };
+  }
+
+  /** Apply one early-stopping evaluation. Returns the report after updating it. */
+  private recordEarlyStop(evaluation: EvaluationResult): EarlyStoppingReport {
+    const early = this.config.earlyStopping;
+    if (!early) return this.earlyStopping;
+    const decision = this.earlyStopDecision(evaluation);
+    this.earlyStopping.evaluations += 1;
+    if (decision.value !== null && decision.improved) {
+      this.earlyStopping.bestValue = decision.value;
+      this.earlyStopping.bestStep = evaluation.step;
+      this.earlyStopping.evaluationsSinceImprovement = 0;
+    } else {
+      this.earlyStopping.evaluationsSinceImprovement += 1;
+    }
+    const pastMinSteps = evaluation.step >= early.minSteps;
+    if (pastMinSteps && this.earlyStopping.evaluationsSinceImprovement >= early.patience) {
+      this.earlyStopping.stoppedEarly = true;
+      this.earlyStopping.stoppingReason =
+        `stopped at step ${evaluation.step}: ${early.monitor} had not improved on ` +
+        `${(this.earlyStopping.bestValue ?? Number.NaN).toFixed(4)} for ` +
+        `${this.earlyStopping.evaluationsSinceImprovement} consecutive evaluation(s), ` +
+        `which met the patience of ${early.patience}`;
+    } else if (decision.value !== null) {
+      this.earlyStopping.stoppingReason = decision.reason;
+    }
+    return this.earlyStopping;
   }
 
   /** Deterministic validation loss over the held-out split. */
@@ -470,11 +741,16 @@ export class AlphaTrainer {
     return this.latestCheckpoint;
   }
 
-  private summary(state: TrainingJobState, startStep: number, durationMs: number): TrainingSummary {
+  private summary(
+    state: TrainingJobState,
+    startStep: number,
+    durationMs: number,
+    reason?: string,
+  ): TrainingSummary {
     const losses = this.history.slice(-Math.max(1, this.stepCount - startStep)).map((p) => p.loss);
     const tokensThisRun = Math.max(0, this.stepCount - startStep) * this.tokensPerStep;
     const lastEvaluation = this.latestCheckpoint?.metrics.validationLoss ?? null;
-    return {
+    const summary: TrainingSummary = {
       jobId: this.runId,
       state,
       steps: Math.max(0, this.stepCount - startStep),
@@ -490,7 +766,19 @@ export class AlphaTrainer {
       checkpoint: this.latestCheckpoint,
       checkpointCount: this.checkpointIds.length,
       corpus: this.corpus.stats,
+      earlyStopping: this.config.earlyStopping ? { ...this.earlyStopping } : null,
+      gradientAccumulationSteps: this.config.gradientAccumulationSteps,
+      tokensPerStep: this.tokensPerStep,
+      stepsSkippedByEarlyStopping: this.earlyStopping.stoppedEarly
+        ? Math.max(0, this.config.totalSteps - this.stepCount)
+        : 0,
     };
+    if (reason && summary.earlyStopping) {
+      // The reason belongs to the run, not to the metric numbers, so it is
+      // carried on the summary without overwriting any measured value.
+      summary.earlyStopping.stoppingReason = reason;
+    }
+    return summary;
   }
 
   /**
@@ -533,9 +821,34 @@ export class AlphaTrainer {
         const checkpoint = this.buildCheckpoint({ trainLoss: point.loss });
         yield { type: "checkpoint", checkpoint };
       }
+
+      // Early stopping is evaluated on its own cadence, which may be finer than
+      // the reporting interval: patience is counted in evaluations, and a
+      // coarse interval would make a patience of 3 mean "three reporting
+      // intervals", which is not what an operator asking for patience 3 means.
+      const earlyInterval = this.earlyStopInterval;
+      if (
+        this.config.earlyStopping &&
+        earlyInterval > 0 &&
+        this.stepCount % earlyInterval === 0
+      ) {
+        const monitored = this.evaluate({ maxBatches: this.config.evalBatches });
+        yield { type: "eval", evaluation: monitored };
+        const report = this.recordEarlyStop(monitored);
+        if (report.stoppedEarly) {
+          // A checkpoint is written before returning, so an early-stopped run is
+          // as resumable as a completed one.
+          const checkpoint = this.buildCheckpoint({ trainLoss: point.loss });
+          yield { type: "checkpoint", checkpoint };
+          return this.summary("stopped", startStep, Date.now() - this.startedAt, report.stoppingReason);
+        }
+      }
     }
 
     const finalEvaluation = this.evaluate({ maxBatches: this.config.evalBatches });
+    // The final evaluation counts toward the monitor too, so the reported best
+    // value is the best over every measurement including the last one.
+    if (this.config.earlyStopping) this.recordEarlyStop(finalEvaluation);
     yield { type: "eval", evaluation: finalEvaluation };
     const finalCheckpoint = this.buildCheckpoint({
       trainLoss: this.history[this.history.length - 1]?.loss,

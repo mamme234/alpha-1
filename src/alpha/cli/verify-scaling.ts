@@ -544,9 +544,14 @@ export async function main(argv: string[]): Promise<number> {
 
   record(
     "24",
-    "Unsupported training features are declared, not implied",
-    RUNTIME_CAPABILITIES.mixedPrecision === false && RUNTIME_CAPABILITIES.gradientAccumulation === false,
-    `mixed precision: not supported; gradient accumulation: not supported; early stopping: not supported; resume, checkpointing and periodic validation: supported`,
+    "Runtime capabilities are declared to match what is actually implemented",
+    // Step 5 implemented gradient accumulation and early stopping, and verified
+    // both numerically. Mixed precision is still not implemented, so it is still
+    // declared false: float32 arithmetic is not mislabelled as half precision.
+    RUNTIME_CAPABILITIES.mixedPrecision === false &&
+      RUNTIME_CAPABILITIES.gradientAccumulation === true &&
+      RUNTIME_CAPABILITIES.earlyStopping === true,
+    `mixed precision: not supported (float32 only, not simulated); gradient accumulation: supported (one update per accumulation group, verified against a concatenated batch); early stopping: supported (validation-metric driven, records best value, best step and reason); resume, checkpointing and periodic validation: supported`,
   );
 
   // ----------------------------------------------------------------- report
