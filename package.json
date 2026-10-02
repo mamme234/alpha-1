@@ -14,6 +14,7 @@
     "alpha:verify": "bun scripts/alpha-train-smoke.ts --verify",
     "alpha:verify-runtime": "bun scripts/alpha-verify-runtime.ts",
     "alpha:verify-scaling": "bun scripts/alpha-verify-scaling.ts",
+    "alpha:verify-capability": "bun scripts/alpha-verify-capability.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "preview": "vite preview"

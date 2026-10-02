@@ -158,40 +158,59 @@ const CONTEXT_PASSAGES: ContextPassage[] = [
 
 const QUESTION_PASSAGES: Array<SourcePassage & { question: string; answer: string }> = [
   {
+    // Every question-answering case supplies its material in the prompt and
+    // asks for an answer that is present verbatim in it. The subject matter is
+    // deliberately outside Alpha's own technical vocabulary: an earlier set of
+    // these cases was worded from the Step 4 corpus's own definitions, which
+    // put the answers into the baseline's training data and turned a
+    // comprehension measurement into a recall measurement.
     id: "qa-1",
-    text: "Cross entropy loss for a model with no information at all equals the logarithm of the vocabulary size.",
-    question: "What does cross entropy loss equal when the model has no information?",
-    answer: "the logarithm of the vocabulary size",
+    text:
+      "The orchard's irrigation channel is cleared in early spring, before the buds open, " +
+      "so that water reaches the roots without obstruction.",
+    question: "When and why is the orchard's irrigation channel cleared?",
+    answer: "in early spring, before the buds open, so that water reaches the roots",
   },
   {
     id: "qa-2",
-    text: "A warmup phase raises the learning rate gradually at the start of training, so that the first updates do not destabilise a randomly initialised model.",
-    question: "Why does warmup raise the learning rate gradually?",
-    answer: "so that the first updates do not destabilise a randomly initialised model",
+    text:
+      "A photographer sets the lens hood rather than a filter, because the hood blocks stray light " +
+      "without changing what reaches the film.",
+    question: "Why does the photographer use a lens hood instead of a filter?",
+    answer: "because the hood blocks stray light without changing what reaches the film",
   },
   {
     id: "qa-3",
     text: "The test split is carved out first and is never handed to the trainer, so evaluation data cannot leak into training.",
     question: "Why is the test split carved out first?",
     answer: "so that evaluation data cannot leak into training",
-  },
-  {
-    id: "qa-4",
-    text: "Byte pair encoding builds a vocabulary by repeatedly merging the most frequent adjacent token pair, starting from single characters.",
-    question: "How does byte pair encoding build a vocabulary?",
-    answer: "by repeatedly merging the most frequent adjacent token pair",
-  },
+  },    {
+      // Deliberately outside Alpha's own domain vocabulary. An earlier version
+      // of this case was worded from the generated corpus's own definition of
+      // byte pair encoding, which put its answer verbatim in the Step 4
+      // baseline's training data: the case measured recall, not extraction.
+      id: "qa-4",
+      text:
+        "The tide gauge at the harbour records the sea level once every ten minutes, " +
+        "and each reading is checked against the chart datum rather than against the previous reading of the harbour.",
+      question: "What is each tide gauge reading checked against?",
+      answer: "the chart datum rather than against the previous reading of the harbour",
+    },
   {
     id: "qa-5",
-    text: "Gradient clipping rescales a gradient whose length exceeds a chosen maximum, which limits the size of one update without changing its direction.",
-    question: "What does gradient clipping do to a gradient that is too long?",
-    answer: "rescales it",
+    text:
+      "A seamstress presses each seam flat as she sews it, because a seam pressed later " +
+      "never lies as smoothly as one pressed at once.",
+    question: "Why does the seamstress press each seam as she sews it?",
+    answer: "because a seam pressed later never lies as smoothly as one pressed at once",
   },
   {
     id: "qa-6",
-    text: "The key value cache stores the keys and values already computed so that they are not computed again, which turns generation from a quadratic recomputation into one step per new token.",
-    question: "What does the key value cache store?",
-    answer: "the keys and values already computed",
+    text:
+      "The lighthouse keeper writes the lamp's hours in a bound book, and at the end of every month " +
+      "that book is read against the shipping list.",
+    question: "What is the lamp book read against at the end of every month?",
+    answer: "at the end of every month the book is read against the shipping list",
   },
 ];
 
@@ -335,6 +354,7 @@ function instructionCases(): EvalCase[] {
       split: "held-out",
       prompt:
         "Instruction: List exactly three properties of layer normalisation, one per line, numbered 1 to 3.\nResponse:",
+      continuation: "1. It normalises the activations.\n2. It stabilises the variance.\n3. It keeps the scale learnable.",
       format: { minListItems: 3, minDistinctWords: 6 },
       measures: "following a counting and formatting instruction",
       language: "en",
@@ -345,6 +365,7 @@ function instructionCases(): EvalCase[] {
       split: "held-out",
       prompt:
         "Instruction: Repeat the word alpha four times, separated by commas, and nothing else.\nResponse:",
+      continuation: "alpha, alpha, alpha, alpha",
       format: { mustContain: ["alpha"], minCharacters: 4, maxCharacters: 40 },
       measures: "following an exact-output instruction (count and delimiter)",
       language: "en",
@@ -355,6 +376,7 @@ function instructionCases(): EvalCase[] {
       split: "held-out",
       prompt:
         "Instruction: Answer in one short sentence. Do not use a list.\nContext: A checkpoint stores the weights and the optimiser state.\nQuestion: What does a checkpoint store?\nResponse:",
+      continuation: "A checkpoint stores the weights and the optimiser state.",
       format: { mustContain: ["checkpoint"], minCharacters: 10, maxCharacters: 200 },
       measures: "following a two-part instruction (answer the question, obey the format)",
       language: "en",
@@ -365,6 +387,7 @@ function instructionCases(): EvalCase[] {
       split: "held-out",
       prompt:
         "Instruction: Continue the pattern. Say the next two letters.\nContext: A, B, C, D,\nResponse:",
+      continuation: "E, F",
       format: { mustContain: ["E"] },
       measures: "following a pattern-completion instruction with an exact expected symbol",
       language: "en",
@@ -372,9 +395,8 @@ function instructionCases(): EvalCase[] {
     {
       id: "inst-5",
       category: "instruction-following",
-      split: "known",
-      prompt:
-        "Instruction: Define attention in one sentence.\nResponse:",
+      split: "known",      prompt: "Instruction: Define attention in one sentence.\nResponse:",
+      continuation: "Attention lets each position decide how much weight to give every other position.",
       format: { mustContain: ["attention"], minCharacters: 15, maxCharacters: 300 },
       measures: "following a definitional instruction on material the model may have seen",
       language: "en",
@@ -385,6 +407,7 @@ function instructionCases(): EvalCase[] {
       split: "held-out",
       prompt:
         "Instruction: Give the answer as two sentences. First state the cause, then the effect.\nContext: The learning rate was set far too high.\nResponse:",
+      continuation: "The learning rate was set far too high. The updates grew too large and the run stopped converging.",
       format: { minCharacters: 15, maxCharacters: 400 },
       measures: "following an ordering instruction (cause before effect)",
       language: "en",
