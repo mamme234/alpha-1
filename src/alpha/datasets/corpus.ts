@@ -19,7 +19,7 @@
  * before encoding and any problem is reported.
  */
 
-import { AlphaRng } from "../core/rng";
+import { AlphaRng, type RngState } from "../core/rng";
 import { AlphaValidationError } from "../core/errors";
 import { ALPHA_RESOURCE_LIMITS, assertResourceLimit } from "../core/limits";
 import type { AlphaTokenizer } from "../tokenizer/bpe";
@@ -283,6 +283,14 @@ export class BatchSampler {
     return this.ids.length;
   }
 
+  saveState(): RngState {
+    return this.rng.saveState();
+  }
+
+  loadState(state: RngState): void {
+    this.rng.loadState(state);
+  }
+
   next(): TrainingBatch {
     const maxStart = this.ids.length - this.seqLen - 1;
     return windowBatch(this.ids, this.batchSize, this.seqLen, () => this.rng.int(maxStart + 1));
@@ -308,6 +316,14 @@ export class DocumentBatchSampler {
   readonly batchSize: number;
   readonly seqLen: number;
   readonly padded = true;
+
+  saveState(): RngState {
+    return this.rng.saveState();
+  }
+
+  loadState(state: RngState): void {
+    this.rng.loadState(state);
+  }
 
   constructor(
     sequences: Int32Array[],

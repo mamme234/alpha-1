@@ -56,6 +56,8 @@ export type CheckpointTokenizerRef = {
 };
 
 export type AlphaCheckpoint = {
+  /** Window-sampler state saved with newer checkpoints. Unset on older ones. */
+  sampler?: RngState | null;
   id: string;
   label: string;
   /** Checkpoint payload version. */
@@ -90,7 +92,7 @@ export type AlphaCheckpoint = {
   /** Base64 float32 payload per parameter name. */
   weights: SerializedWeights;
   optimizer: OptimizerStateSnapshot;
-  rng: RngState;
+  rng?: RngState | null;
   createdAt: number;
   sizeBytes: number;
   /** Stage implied purely by the existence of this checkpoint. */
@@ -102,6 +104,10 @@ export type AlphaCheckpoint = {
 
 export type CreateCheckpointInput = {
   label: string;
+  /** Window-sampler state to store with this checkpoint. Omit for old-resume behaviour. */
+  sampler?: RngState | null;
+  /** The RNG stream state at this step. Omit for old-resume behaviour. */
+  //
   modelName: string;
   modelVersion: string;
   config: AlphaModelConfig;
@@ -116,7 +122,7 @@ export type CreateCheckpointInput = {
   metrics: AlphaCheckpointMetrics;
   weights: SerializedWeights;
   optimizer: OptimizerStateSnapshot;
-  rng: RngState;
+  rng?: RngState;
   runId: string;
   seed: number;
   trainingConfig: TrainingConfig;
@@ -158,7 +164,7 @@ export function createCheckpoint(input: CreateCheckpointInput): AlphaCheckpoint 
     metrics: input.metrics,
     weights: input.weights,
     optimizer: input.optimizer,
-    rng: input.rng,
+    rng: input.rng ?? null,
     createdAt: input.createdAt ?? Date.now(),
     sizeBytes,
     stage: input.step > 0 ? (input.isFineTune ? "fine-tuned" : "trained") : "untrained",
@@ -195,7 +201,9 @@ export function parseCheckpoint(json: string): AlphaCheckpoint {
     throw new AlphaCheckpointError("checkpoint payload is not an object");
   }
   const candidate = parsed as Partial<AlphaCheckpoint>;
-  const missing = (["id", "config", "weights", "optimizer", "rng", "step"] as const).filter(
+  // Old checkpoints declared `rng: RngState` (required). Newer ones may pin it
+  // to null; either way it is not a required field for construction.
+  const missing = (["id", "config", "weights", "optimizer", "step"] as const).filter(
     (key) => candidate[key] === undefined,
   );
   if (missing.length > 0) {
@@ -316,8 +324,13 @@ export function validateCheckpoint(checkpoint: AlphaCheckpoint): CheckpointValid
   }
 
   // --- rng ----------------------------------------------------------------
-  if (!checkpoint.rng || !Number.isFinite(checkpoint.rng.seed) || checkpoint.rng.calls < 0) {
-    fail("rng state is missing or invalid");
+  // Older checkpoints stored a mandatory rng; newer ones store null (no state).
+  // Neither is a failure: a run that never saved a stream still resumes its
+  // dropout from its seed, which is what the old code did.
+  if (checkpoint.rng !== undefined && checkpoint.rng !== null) {
+    if (!Number.isFinite(checkpoint.rng.seed) || checkpoint.rng.calls < 0) {
+      fail("rng state is missing or invalid");
+    }
   }
 
   // --- tokenizer ----------------------------------------------------------

@@ -36,7 +36,15 @@ import { words } from "../datasets/diversity";
 
 export const ALPHA_EVAL_SUITE_VERSION = "1.0.0";
 
-/** The eight behaviours Step 5 measures, kept separate throughout. */
+/**
+ * The behaviours Alpha measures, kept separate throughout.
+ *
+ * Step 5's eight are the verified production set. Step 7 adds the three
+ * categories below for the new model — mathematics, reasoning and coding —
+ * whose cases are measured on a SEPARATE frozen extension suite so that the
+ * production suite's fingerprint (and Step 5's recorded results) are never
+ * rewritten by Step 7 work.
+ */
 export const EVAL_CATEGORIES = [
   "language-modeling",
   "completion",
@@ -46,6 +54,9 @@ export const EVAL_CATEGORIES = [
   "structured-output",
   "context-retention",
   "generation-quality",
+  "mathematics",
+  "reasoning",
+  "coding",
 ] as const;
 
 export type EvalCategory = (typeof EVAL_CATEGORIES)[number];

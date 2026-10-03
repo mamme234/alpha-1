@@ -18,6 +18,7 @@
  */
 
 import { AlphaRng } from "../core/rng";
+import type { RngState } from "../core/rng";
 import { AlphaValidationError } from "../core/errors";
 import { assertResourceLimit } from "../core/limits";
 import { backward, crossEntropy, scale, setGradEnabled, type Tensor } from "../core/tensor";
@@ -309,6 +310,8 @@ export type TrainerOptions = {
 type Sampler = {
   next(): TrainingBatch;
   sequentialBatches(): Generator<TrainingBatch>;
+  saveState(): RngState;
+  loadState(state: RngState): void;
 };
 
 export class AlphaTrainer {
@@ -323,6 +326,7 @@ export class AlphaTrainer {
   readonly history: TrainingMetricPoint[] = [];
   private readonly sampler: Sampler;
   private readonly validationSampler: Sampler;
+  private read?: boolean;
   private readonly rng: AlphaRng;
   private readonly checkpointLabel: string;
   private readonly isFineTune: boolean;
@@ -701,9 +705,10 @@ export class AlphaTrainer {
           metrics?.validationPerplexity ?? (Number.isFinite(evaluation.perplexity) ? evaluation.perplexity : null),
         uniformLoss: metrics?.uniformLoss ?? this.uniformLoss,
       },
-      weights: this.model.serializeWeights(),
-      optimizer: this.optimizer.snapshot(),
-      rng: this.rng.saveState(),
+    weights: this.model.serializeWeights(),
+    optimizer: this.optimizer.snapshot(),
+    rng: this.rng.saveState(),
+    sampler: this.sampler.saveState(),
       runId: this.runId,
       seed: this.config.seed,
       trainingConfig: this.config,
@@ -735,6 +740,24 @@ export class AlphaTrainer {
     this.stepCount = checkpoint.step;
     this.latestCheckpoint = checkpoint;
     if (!this.checkpointIds.includes(checkpoint.id)) this.checkpointIds.unshift(checkpoint.id);
+    // Rebuild the exact random windows and the exact dropout stream from the
+    // checkpoint's saved RNG and sampler state. Without this, a resumed run
+    // would resample both — five chunks of ten steps would look like six
+    // passes over the same fourteen windows, which is not the same run at
+    // all.
+    if (checkpoint.sampler !== undefined) {
+      if (this.sampler instanceof BatchSampler) {
+        (this.sampler as BatchSampler).loadState(checkpoint.sampler ?? { seed: 0, calls: 0 });
+      } else if (this.sampler instanceof DocumentBatchSampler) {
+        (this.sampler as DocumentBatchSampler).loadState(checkpoint.sampler ?? { seed: 0, calls: 0 });
+      }
+    }
+    // The dropout generator is rebuilt from the same rule, but only when the
+    // checkpoint was produced by this configuration's seed: otherwise the
+    // state came from an unknown stream and replaying it would be dishonest.
+    if (checkpoint.seed === this.config.seed && checkpoint.rng !== undefined) {
+      this.rng.loadState(checkpoint.rng ?? { seed: 0, calls: 0 });
+    }
   }
 
   get checkpoint(): AlphaCheckpoint | null {

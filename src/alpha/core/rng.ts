@@ -7,6 +7,8 @@
  * deterministic rather than merely "similar".
  */
 
+import { AlphaValidationError } from "../core/errors";
+
 export type RngState = {
   seed: number;
   calls: number;
@@ -83,6 +85,25 @@ export class AlphaRng {
    */
   saveState(): RngState {
     return { seed: this.seed, calls: this.calls };
+  }
+
+  /**
+   * Restore a previously saved stream. The generator is additive, so the state
+   * is recovered in O(1) rather than by replaying `calls` draws.
+   */
+  loadState(state: RngState): void {
+    if (!Number.isInteger(state.seed) || state.calls < 0) {
+      throw new Error(
+        `cannot load an invalid rng state (seed ${state.seed}, calls ${state.calls})`,
+      );
+    }
+    if (state.seed !== this.seed) {
+      throw new Error(
+        `cannot restore an rng from a checkpoint seeded ${state.seed} into an rng seeded ${this.seed}`,
+      );
+    }
+    this.state = (state.seed + (state.calls * 0x6d2b79f5) >>> 0) >>> 0;
+    this.calls = state.calls;
   }
 
   static fromState(state: RngState): AlphaRng {
