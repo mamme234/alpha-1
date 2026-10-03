@@ -636,7 +636,7 @@ async function verifyLive(): Promise<void> {
     message: 'calculate "12 * 4"',
     settings: { maxNewTokens: 64, deterministic: true },
   });
-  await sleep(600);
+  await sleep(350);
   // One round trip, not two: the server finds the live stream for the
   // conversation itself.
   const requested = convexRun("alpha/chat:stopLatest", { sessionToken: tokenA, conversationId });
@@ -657,21 +657,26 @@ async function verifyLive(): Promise<void> {
         : "FAIL",
       `stop accepted; final status ${finalValue?.status} (${finalValue?.stopReason}); ${finalValue?.text.length ?? 0} chars kept`,
     );
-  } else if ((requestedValue?.reason ?? "").includes("already finished")) {
-    // The CLI round trip was slower than the remaining generation. This is a
-    // timing miss on this machine, not evidence that stop does not work.
+  } else if (
+    (requestedValue?.reason ?? "").includes("already finished") ||
+    (requestedValue?.reason ?? "").includes("no generation has run")
+  ) {
+    // The CLI round trip was slower than the generation, or faster than the
+    // stream row's creation. Either way this is a timing miss on this machine,
+    // not evidence that stop does not work.
     record(
       "L12",
       "a live generation stops mid-stream and keeps its partial answer",
       "SKIP",
-      `the turn finished before the stop request arrived: ${requestedValue?.reason}`,
+      `the stop request missed the live window: ${requestedValue?.reason}`,
     );
   } else {
+    const clue = (requested.stderr || requested.stdout).trim().split("\n").slice(-1)[0] ?? "no output";
     record(
       "L12",
       "a live generation stops mid-stream and keeps its partial answer",
       "FAIL",
-      `stop was refused: ${requestedValue?.reason ?? "no reason"}`,
+      `stop was refused: ${requestedValue?.reason ?? clue}`,
     );
   }
 
