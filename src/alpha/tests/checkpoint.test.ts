@@ -255,74 +255,8 @@ describe("alpha checkpoint system", () => {
     expect(resumed.step).toBe(6);
     expect(resumed.sampler.saveState()).toEqual(checkpoint.sampler);
   });
-describe("checkpoint", () => {
-  const trained = trainedCheckpoint();
-  const { checkpoint, tokenizer } = trained;
 
-  it("round-trips a checkpoint through JSON", () => {
-    const { checkpointToJson, parseCheckpoint } = require("../..");
-    const json = checkpointToJson(checkpoint);
-    const parsed = parseCheckpoint(json);
-    expect(parsed.id).toBe(checkpoint.id);
-    expect(parsed.configFingerprint).toBe(checkpoint.configFingerprint);
-    expect(parsed.tokenizer.fingerprint).toBe(checkpoint.tokenizer.fingerprint);
-  });
-
-  it("resumes with sampler state so windows and dropout continue exactly", () => {
-    const { checkpoint, tokenizer } = trainedCheckpoint();
-    const { seedCorpusSlice, TRAINING } = requireTestHelpers();
-    const { AlphaTrainer, AlphaTransformer } = require("../..");
-    const fresh = new AlphaTransformer(checkpoint.config);
-    const resumed = new AlphaTrainer({
-      model: fresh,
-      tokenizer,
-      dataset: seedCorpusSlice(8),
-      config: { ...TRAINING, totalSteps: 8 },
-      checkpointLabel: "resume-sampler",
-      runId: "run_resume_sampler",
-      isFineTune: true,
-    });
-    resumed.resumeFrom(checkpoint);
-    resumed.sampler.next();
-    expect(resumed.step).toBe(6);
-    expect(resumed.sampler.saveState()).toEqual(checkpoint.sampler);
-  });
-
-
-describe("checkpoint", () => {
-  const trained = trainedCheckpoint();
-  const { checkpoint, tokenizer } = trained;
-
-  it("round-trips a checkpoint through JSON", () => {
-    const { checkpointToJson, parseCheckpoint } = require("../..");
-    const json = checkpointToJson(checkpoint);
-    const parsed = parseCheckpoint(json);
-    expect(parsed.id).toBe(checkpoint.id);
-    expect(parsed.configFingerprint).toBe(checkpoint.configFingerprint);
-    expect(parsed.tokenizer.fingerprint).toBe(checkpoint.tokenizer.fingerprint);
-  });
-
-  it("resumes with sampler state so windows and dropout continue exactly", () => {
-    const { checkpoint, tokenizer } = trainedCheckpoint();
-    const { seedCorpusSlice, TRAINING } = requireTestHelpers();
-    const { AlphaTrainer, AlphaTransformer } = require("../..");
-    const fresh = new AlphaTransformer(checkpoint.config);
-    const resumed = new AlphaTrainer({
-      model: fresh,
-      tokenizer,
-      dataset: seedCorpusSlice(8),
-      config: { ...TRAINING, totalSteps: 8 },
-      checkpointLabel: "resume-sampler",
-      runId: "run_resume_sampler",
-      isFineTune: true,
-    });
-    resumed.resumeFrom(checkpoint);
-    resumed.sampler.next();
-    expect(resumed.step).toBe(6);
-    expect(resumed.sampler.saveState()).toEqual(checkpoint.sampler);
-  });
-
-  it("encodes the corpus it recorded") {
+  it("encodes the corpus it recorded", () => {
     const { checkpoint, tokenizer } = trainedCheckpoint();
     const corpus = encodeCorpus(seedCorpusSlice(8), tokenizer, { validationFraction: 0.25 });
     const sampler = new BatchSampler(corpus.trainIds, {

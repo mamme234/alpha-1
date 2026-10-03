@@ -1,1 +1,37 @@
-/**\n * Alpha model — Step 7 micro-v2 configuration.\n *\n * Frozen preset for the Step 7 experiment. Do not edit after the training run\n * starts: it is the architecture the model being verified was built with.\n *\n * Preset (micro-v2): vocab 768, contextLength 256, dModel 160, nHeads 4,\n * nLayers 4, dFeedForward 640, dropout 0.05, learned positional, tied\n * embeddings, initStd 0.02 — ~1,401,280 parameters.\n */\n\nimport { ALPHA_MODEL_PRESETS, AlphaModelConfig, createModelConfig } from \"./config\";\n\nexport const ALPHA_MODEL_PRESETS_MICRO_V2: AlphaModelConfig = {\n  name: \"alpha-micro-v2\",\n  version: \"0.1.0\",\n  vocabSize: 768,\n  contextLength: 256,\n  dModel: 160,\n  nHeads: 4,\n  nLayers: 4,\n  dFeedForward: 640,\n  dropout: 0.05,\n  normEps: 1e-5,\n  positionalEncoding: \"learned\",\n  tieEmbeddings: true,\n  initStd: 0.02,\n};\n\n/**\n * Adapt an existing preset by widening its vocabulary to the trained\n * tokenizer's. Used for a model whose vocabulary is the tokenizer's rather\n * than the preset's own.\n */\nexport function createMicroV2Config(overrides: {\n  vocabSize?: number;\n  contextLength?: number;\n  dModel?: number;\n  nHeads?: number;\n  nLayers?: number;\n  dFeedForward?: number;\n}): AlphaModelConfig {\n  return createModelConfig({\n    preset: \"nano\",\n    ...overrides,\n    name: overrides.name ?? ALPHA_MODEL_PRESETS_MICRO_V2.name,\n    version: overrides.version ?? ALPHA_MODEL_PRESETS_MICRO_V2.version,\n    positionalEncoding: ALPHA_MODEL_PRESETS_MICRO_V2.positionalEncoding,\n    tieEmbeddings: ALPHA_MODEL_PRESETS_MICRO_V2.tieEmbeddings,\n    initStd: ALPHA_MODEL_PRESETS_MICRO_V2.initStd,\n  } as Partial<AlphaModelConfig> & { preset?: never });\n}\n\n/**\n * The Step 7 micro-v2 preset exactly as frozen, at its own 768-token\n * vocabulary. This is the configuration a reader should load for the\n * capability gate.\n */\nexport function microV2Config(): AlphaModelConfig {\n  return { ...ALPHA_MODEL_PRESETS_MICRO_V2 };\n}\n","summary":null}
+/**
+ * Alpha model — Step 7 micro-v2 configuration.
+ *
+ * Frozen preset for the Step 7 experiment. Do not edit after the training run
+ * starts: it is the architecture the model being verified was built with.
+ *
+ * Preset (micro-v2): vocab 768, contextLength 256, dModel 160, nHeads 4,
+ * nLayers 4, dFeedForward 640, dropout 0.05, learned positional, tied
+ * embeddings, initStd 0.02 — ~1,401,280 parameters.
+ */
+
+import { ALPHA_MODEL_PRESETS, AlphaModelConfig, createModelConfig } from "./config";
+
+export const ALPHA_MODEL_PRESETS_MICRO_V2: AlphaModelConfig = {
+  name: "alpha-micro-v2",
+  version: "0.1.0",
+  vocabSize: 768,
+  contextLength: 256,
+  dModel: 160,
+  nHeads: 4,
+  nLayers: 4,
+  dFeedForward: 640,
+  dropout: 0.05,
+  normEps: 1e-5,
+  positionalEncoding: "learned",
+  tieEmbeddings: true,
+  initStd: 0.02,
+};
+
+/**
+ * The Step 7 micro-v2 preset exactly as frozen, at its own 768-token
+ * vocabulary. This is the configuration a reader should load for the
+ * capability gate.
+ */
+export function microV2Config(): AlphaModelConfig {
+  return { ...ALPHA_MODEL_PRESETS_MICRO_V2 };
+}

@@ -69,6 +69,43 @@ export type TestStack = {
   workspace: AlphaWorkspace;
 };
 
+export type SeedCorpusDoc = ReturnType<typeof seedCorpusSlice>;
+
+export function requireTestHelpers(): {
+  seedCorpusSlice: (count: number) => SeedCorpusDoc;
+  TRAINING: {
+    batchSize: number;
+    seqLen: number;
+    totalSteps: number;
+    learningRate: number;
+    warmupSteps: number;
+    evalInterval: number;
+    checkpointInterval: number;
+    evalBatches: number;
+    validationFraction: number;
+    seed: number;
+  };
+} {
+  return {
+    seedCorpusSlice,
+    TRAINING,
+  };
+}
+
+/** The tiny training config used by the checkpoint tests. */
+export const TRAINING = {
+  batchSize: 2,
+  seqLen: 16,
+  totalSteps: 6,
+  learningRate: 4e-3,
+  warmupSteps: 2,
+  evalInterval: 0,
+  checkpointInterval: 0,
+  evalBatches: 2,
+  validationFraction: 0.25,
+  seed: 5,
+};
+
 /** Wire a full stack, including the agent actor scope. */
 export async function buildStack(): Promise<TestStack> {
   const tokenizer = buildTokenizer();
