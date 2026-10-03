@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { AlphaTokenizer } from "../tokenizer/bpe";
-import { AlphaTransformer } from "../model/transformer";
 import { modelConfigFingerprint } from "../model/config";
 import { AlphaTrainer } from "../training/trainer";
+import { AlphaTransformer } from "../model/transformer";
 import {
   ALPHA_CHECKPOINT_FORMAT_VERSION,
   assertCheckpointCompatible,
@@ -236,7 +236,7 @@ describe("alpha checkpoint system", () => {
 
   it("resumes with sampler state so windows and dropout continue exactly", () => {
     const { checkpoint, tokenizer } = trainedCheckpoint();
-    const { seedCorpusSlice, TRAINING, buildModel } = requireTestHelpers();
+    const { seedCorpusSlice, TRAINING } = requireTestHelpers();
     const { AlphaTrainer } = require("../training/trainer");
     const fresh = new AlphaTransformer(checkpoint.config);
     const resumed = new AlphaTrainer({
