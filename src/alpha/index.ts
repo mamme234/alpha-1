@@ -434,6 +434,8 @@ export {
   type RespondRequest,
   type RespondResult,
   type RespondRoute,
+  type RespondStreamEvent,
+  type RespondStreamOptions,
   type RespondVerification,
   type RouteDecision,
 } from "./runtime/orchestrator";
@@ -776,6 +778,40 @@ export {
   type ExperimentMeasurements,
   type ExperimentStatus,
 } from "./training/experiments";
+
+// --- step 6: serving the verified model --------------------------------------
+export {
+  ALPHA_SERVING_ARTIFACT_FORMAT,
+  createServingArtifact,
+  describeServingArtifact,
+  loadServingArtifact,
+  parseServingArtifact,
+  type AlphaServingArtifact,
+  type LoadedServingArtifact,
+} from "./serving/artifact";
+export {
+  ALPHA_CHAT_TOOL_ALLOWLIST,
+  ALPHA_SERVING_SYSTEM_INSTRUCTION,
+  AlphaServingRuntime,
+  createServingRuntime,
+  type AlphaServingRuntimeOptions,
+  type ServingHydrationInput,
+  type ServingHydrationReport,
+  type ServingMemoryRecord,
+  type ServingRuntimeHealth,
+  type ServingRuntimeInfo,
+  type ServingRuntimeLimits,
+  type ServingVectorRecord,
+} from "./serving/runtime";
+export {
+  CHAT_MAX_HISTORY_TURNS,
+  buildChatRequest,
+  runChatTurn,
+  runChatTurnStream,
+  type ChatHistoryTurn,
+  type ChatTurnInput,
+  type ChatTurnSettings,
+} from "./serving/chat";
 
 // --- manifest + workspace ---------------------------------------------------
 export { ALPHA_MODULES, moduleById, moduleStatusCounts } from "./modules";

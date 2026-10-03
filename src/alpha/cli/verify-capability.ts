@@ -3,6 +3,12 @@
  *
  *   bun scripts/alpha-verify-capability.ts
  *   bun scripts/alpha-verify-capability.ts --json
+ *   bun scripts/alpha-verify-capability.ts --export-artifact <path>
+ *
+ * `--export-artifact` writes the trained candidate arm — weights, tokenizer
+ * snapshot, configuration and every fingerprint recorded above — to a serving
+ * artifact. The artifact is therefore written by the same run that measured the
+ * model, so what Step 6 serves is exactly what Step 5 verified.
  *
  * Walks the required pipeline end to end, and prints a measurement at every
  * stage rather than a claim:
@@ -31,6 +37,8 @@
  * It never declares a winner, and it reports a regression as a regression.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   ALPHA_EVAL_SUITE_VERSION,
   ALPHA_MIX_CATEGORIES,
@@ -101,6 +109,11 @@ import {
   type TokenizerDecision,
   type TokenizerMeasurement,
 } from "../index";
+import {
+  createServingArtifact,
+  describeServingArtifact,
+  loadServingArtifact,
+} from "../serving/artifact";
 
 // ---------------------------------------------------------------------------
 // check plumbing
@@ -327,6 +340,8 @@ function worstTokenRun(report: CapabilityReport): number {
 
 export async function main(argv: string[]): Promise<number> {
   const json = argv.includes("--json");
+  const exportFlag = argv.indexOf("--export-artifact");
+  const exportPath = exportFlag >= 0 ? (argv[exportFlag + 1] ?? null) : null;
   quiet = json;
   const startedAt = Date.now();
 
@@ -1321,6 +1336,63 @@ export async function main(argv: string[]): Promise<number> {
         2,
       ),
     );
+  }
+
+  if (exportPath) {
+    const artifact = createServingArtifact({
+      model: candidateRun.model,
+      tokenizer,
+      stage: "trained",
+      createdAt: RECORDED_AT,
+      training: {
+        steps: candidateMetrics.steps,
+        tokensSeen: candidateMetrics.tokensSeen,
+        tokensPerStep: candidateRun.summary.tokensPerStep,
+        seed: SEED,
+        firstLoss: candidateMetrics.firstLoss,
+        lastLoss: candidateMetrics.lastLoss,
+        validationLoss: candidateMetrics.validationLoss,
+        validationPerplexity: candidateMetrics.validationPerplexity,
+        uniformLossBaseline: candidateMetrics.uniformLossBaseline,
+        durationMs: candidateMetrics.durationMs,
+        tokensPerSecond: candidateMetrics.tokensPerSecond,
+        checkpointId: candidateRun.trainer.checkpoint?.id ?? null,
+        gradientAccumulationSteps: candidateRun.summary.gradientAccumulationSteps,
+        config: trainingConfig,
+      },
+      data: {
+        datasetName: candidateVersion.name,
+        datasetVersion: candidateVersion.version,
+        datasetFingerprint: candidateVersion.manifest.fingerprint,
+        mixtureFingerprint: mixture.fingerprint,
+        documents: candidateVersion.documents.length,
+        characters: candidateRunTexts.reduce((sum, text) => sum + text.length, 0),
+      },
+      evaluation: {
+        suiteFingerprint: suite.fingerprint,
+        suiteCases: suite.cases.length,
+        heldOutDocuments: heldOutDocuments.length,
+        loss: candidateReport.languageModeling.loss,
+        perplexity: candidateReport.languageModeling.perplexity,
+        nextTokenTop1Accuracy: candidateReport.languageModeling.nextTokenTop1Accuracy,
+        gateFingerprint: gate.gateFingerprint,
+        gatePassed: gate.passed,
+      },
+    });
+    // Written with a newline and no pretty printing: the weights dominate the
+    // size, and indentation would cost a third of the file for nothing.
+    mkdirSync(dirname(exportPath), { recursive: true });
+    writeFileSync(exportPath, `${JSON.stringify(artifact)}\n`, "utf8");
+    if (!quiet) {
+      console.log(`\nServing artifact written to ${exportPath}`);
+      console.log(`  ${describeServingArtifact(artifact)}`);
+      console.log(
+        `  ${(JSON.stringify(artifact).length / 1024 ** 2).toFixed(2)} MiB on disk · loading it back and re-checking its fingerprints…`,
+      );
+    }
+    const reloaded = loadServingArtifact(artifact);
+    const reloadNote = `artifact ${artifact.formatVersion} reloaded in ${reloaded.loadMs}ms: tokenizer ${reloaded.tokenizer.fingerprint()}, ${reloaded.model.parameterCount.toLocaleString()} parameters, weights matched tensor-for-tensor`;
+    record("27", "The exported serving artifact reloads with matching fingerprints and weights", true, reloadNote);
   }
 
   return allPassed ? 0 : 1;

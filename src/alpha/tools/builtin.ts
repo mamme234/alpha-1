@@ -29,6 +29,7 @@ function service<T>(services: ToolServices, key: string): T {
 
 export const BUILTIN_TOOL_NAMES = [
   "alpha.text.stats",
+  "alpha.time.now",
   "alpha.calculator",
   "alpha.tokenizer.analyze",
   "alpha.corpus.search",
@@ -65,6 +66,25 @@ export function registerBuiltinTools(registry: AlphaToolRegistry): string[] {
     verify: (output) => ({
       ok: output.words > 0 || output.characters > 0,
       reason: output.characters > 0 ? "text measured" : "text was empty",
+    }),
+  });
+
+  registry.register<Record<string, never>, { iso: string; epochMs: number; utc: string }>({
+    name: "alpha.time.now",
+    description:
+      "Report the current date and time from the server clock. Local capability only — no network call is made.",
+    module: "tools",
+    inputSchema: objectSchema({}, []),
+    permission: "tool.execute",
+    source: "builtin",
+    tags: ["time", "date", "clock", "today", "now", "utc"],
+    handler: () => {
+      const now = new Date();
+      return { iso: now.toISOString(), epochMs: now.getTime(), utc: now.toUTCString() };
+    },
+    verify: (output) => ({
+      ok: typeof output.iso === "string" && output.iso.length > 0,
+      reason: "time read from the system clock",
     }),
   });
 
