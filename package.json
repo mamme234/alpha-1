@@ -2,7 +2,7 @@
   "name": "alpha",
   "private": true,
   "version": "0.1.0",
-  "description": "Alpha — a self-owned AI/LLM system with its own model, training, inference, memory, tools, agents, RAG, security and runtime.",
+  "description": "Alpha \u2014 a self-owned AI/LLM system with its own model, training, inference, memory, tools, agents, RAG, security and runtime.",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -18,7 +18,8 @@
     "alpha:verify-production": "bun scripts/alpha-verify-production.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "alpha:train-step7": "bun scripts/alpha-train-step7.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
