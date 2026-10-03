@@ -20,7 +20,7 @@ import { AlphaCheckpointError } from "../core/errors";
 import { AlphaRng } from "../core/rng";
 import { encodeCorpus, BatchSampler } from "../datasets/corpus";
 import { seedCorpusSlice } from "../datasets/seed-corpus";
-import { gradientCheckFixture } from "./helpers";
+import { gradientCheckFixture, requireTestHelpers } from "./helpers";
 
 const TRAINING = {
   batchSize: 2,
@@ -236,8 +236,8 @@ describe("alpha checkpoint system", () => {
 
   it("resumes with sampler state so windows and dropout continue exactly", () => {
     const { checkpoint, tokenizer } = trainedCheckpoint();
-    const { seedCorpusSlice, TRAINING } = requireTestHelpers();
-    const { AlphaTrainer, AlphaTransformer } = require("../..");
+    const { seedCorpusSlice, TRAINING, buildModel } = requireTestHelpers();
+    const { AlphaTrainer } = require("../training/trainer");
     const fresh = new AlphaTransformer(checkpoint.config);
     const resumed = new AlphaTrainer({
       model: fresh,
