@@ -1,0 +1,82 @@
+{
+  "recordedAt": 1791012240567,
+  "purpose": "Step 7 baseline: the production model at the start of Step 7. Never overwritten, always loadable.",
+  "artifact": {
+    "path": "src/alpha/serving/step5-artifact.json",
+    "bytes": 2251623,
+    "sha256": "e2cdc276e123f56527a8c0b7f120d8550bdd7093f40f968757bbe7ab9efb5de2",
+    "formatVersion": "alpha-serving-artifact/1",
+    "createdAt": 1760000000000
+  },
+  "identity": {
+    "modelId": "alpha-micro@0.1.0+tok_e8edb134",
+    "name": "alpha-micro",
+    "version": "0.1.0",
+    "stage": "trained",
+    "parameterCount": 418656,
+    "contextLength": 96
+  },
+  "fingerprints": {
+    "config": "cfg_49e2ffd4",
+    "tokenizer": "tok_e8edb134",
+    "dataset": "ds_fba46415",
+    "mixture": "mix_3195f6e1",
+    "suite": "evl_b58eacf7",
+    "gate": "gate_6529da15",
+    "checkpoint": "ckpt_mur0t3nt18o94",
+    "datasetName": "alpha-step5-mixture",
+    "datasetVersion": "1.0.0"
+  },
+  "training": {
+    "steps": 32,
+    "tokensSeen": 24576,
+    "durationMs": 37452,
+    "tokensPerSecond": 656,
+    "seed": 1337,
+    "firstLoss": 6.657307721086239,
+    "lastLoss": 4.271386985247268,
+    "validationLoss": 4.374020932511061,
+    "validationPerplexity": 79.36210065005494,
+    "gradientAccumulationSteps": 2,
+    "config": {
+      "batchSize": 8,
+      "seqLen": 48,
+      "totalSteps": 32,
+      "learningRate": 0.002,
+      "schedule": "cosine",
+      "warmupSteps": 5,
+      "minFactor": 0.1,
+      "weightDecay": 0.01,
+      "gradClipNorm": 1,
+      "evalInterval": 8,
+      "evalBatches": 3,
+      "validationFraction": 0.12,
+      "seed": 1337,
+      "checkpointInterval": 32,
+      "batchMode": "windows",
+      "gradientAccumulationSteps": 2,
+      "earlyStopping": {
+        "monitor": "validationLoss",
+        "patience": 3,
+        "minDelta": 0.01,
+        "minSteps": 16,
+        "evalEvery": 8
+      }
+    }
+  },
+  "evaluation": {
+    "suiteFingerprint": "evl_b58eacf7",
+    "suiteCases": 77,
+    "heldOutDocuments": 39,
+    "loss": 4.38888226840836,
+    "perplexity": 80.55033499085867,
+    "nextTokenTop1Accuracy": 0.31727651690597497,
+    "gateFingerprint": "gate_6529da15",
+    "gatePassed": true
+  },
+  "serving": {
+    "loads": true,
+    "loadMs": 47,
+    "contextLength": 96
+  }
+}

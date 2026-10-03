@@ -207,8 +207,10 @@ export type GateEvaluation = {
  * Read one measurement straight off a report, by the same names the comparison
  * table uses. Only the language-modelling trio is not read from a category, so
  * only those three need a direct accessor here.
+ *
+ * Exported so Step 7's stricter gate reads numbers the same way this one does.
  */
-function measurementValue(report: CapabilityReport, measurement: string): number | null {
+export function measurementValue(report: CapabilityReport, measurement: string): number | null {
   switch (measurement) {
     case "languageModeling.loss":
       return report.languageModeling.loss;
