@@ -42,6 +42,7 @@ import { AlphaToolRegistry, type ToolExecutionRecord } from "../tools/registry";
 import type { JsonSchema } from "../tools/schema";
 import { AlphaAgentRuntime } from "../agents/runtime";
 import type { AgentRunResult } from "../agents/types";
+import { createGenerationCancellation } from "../inference/engine";
 import type {
   AlphaInferenceEngine,
   GenerationCancellation,
@@ -763,8 +764,13 @@ export class AlphaAiRuntime {
     stopEvery: number,
     onDelta: (delta: string, index: number) => void,
   ): AsyncGenerator<RespondStreamEvent, GenerationResult, void> {
+    // The engine can only stop at a token boundary through a cancellation
+    // handle. A caller that supplies `shouldStop` but no handle still gets a
+    // working stop: this generation owns a handle of its own, so a stop request
+    // is never silently ignored.
+    const cancellation = options.cancellation ?? createGenerationCancellation();
     const stream = this.inference.generateStream(prompt, request.sampling, {
-      cancellation: options.cancellation ?? null,
+      cancellation,
     });
     let index = 0;
     let next = await stream.next();
@@ -782,7 +788,7 @@ export class AlphaAiRuntime {
           stop = false;
         }
         if (stop) {
-          options.cancellation?.cancel("stopped by the caller");
+          cancellation.cancel("stopped by the caller");
         }
       }
       next = await stream.next();

@@ -138,6 +138,51 @@ const schema = defineSchema(
       .index("by_message", ["messageId"]),
 
     /**
+     * Live generation state for the streaming chat UI.
+     *
+     * A Convex action cannot push to a browser, so the action that runs a chat
+     * turn writes each token here and the client subscribes to the row. The
+     * row is the stream: `chunks` and `text` grow while `status` is
+     * `streaming`, `stopRequested` is what the stop button sets, and `status`
+     * becomes `done` | `stopped` | `error` only after the final assistant
+     * message has been persisted — so a client that sees a finished stream can
+     * trust the transcript to already contain the answer.
+     */
+    alphaStreams: defineTable({
+      actorId: v.string(),
+      conversationId: v.string(),
+      streamId: v.string(),
+      requestId: v.string(),
+      /** streaming | done | stopped | error */
+      status: v.string(),
+      /** Set by the stop button; read between tokens by the generation loop. */
+      stopRequested: v.boolean(),
+      chunks: v.array(v.string()),
+      text: v.string(),
+      modelId: v.string(),
+      modelStage: v.string(),
+      /** Sampling configuration this stream is running with. */
+      generationConfig: v.any(),
+      /** Tokens the assembled request spent, when known. */
+      promptTokens: v.optional(v.number()),
+      outputTokens: v.optional(v.number()),
+      /** Set when the turn failed; the actual error, stored rather than hidden. */
+      error: v.optional(v.string()),
+      /** done | length | cancelled | error — why generation ended. */
+      stopReason: v.optional(v.string()),
+      /** The assistant message this stream produced, once it is persisted. */
+      messageId: v.optional(v.string()),
+      /** How the turn was routed: inference | memory | retrieval | tool | agent. */
+      route: v.optional(v.string()),
+      latencyMs: v.optional(v.number()),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+      finishedAt: v.optional(v.number()),
+    })
+      .index("by_actor_conversation", ["actorId", "conversationId"])
+      .index("by_stream", ["streamId"]),
+
+    /**
      * Model records. `stage` is one of architecture | untrained | trained |
      * fine-tuned | production and is derived from artefacts, never asserted.
      */

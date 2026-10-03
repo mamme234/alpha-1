@@ -74,6 +74,14 @@ export function buildChatRequest(
     .filter((turn) => typeof turn.content === "string" && turn.content.trim() !== "")
     .slice(-CHAT_MAX_HISTORY_TURNS);
 
+  // A caller may narrow the tool list, never widen it: whatever is requested is
+  // intersected with the chat allow-list, so a client-supplied name for a
+  // privileged tool simply is not in the request.
+  const requestedTools = input.settings?.allowedTools;
+  const allowedTools = requestedTools
+    ? ALPHA_CHAT_TOOL_ALLOWLIST.filter((name) => requestedTools.includes(name))
+    : [...ALPHA_CHAT_TOOL_ALLOWLIST];
+
   return {
     message,
     actorId: input.actorId,
@@ -82,7 +90,7 @@ export function buildChatRequest(
     history,
     useMemory: input.settings?.useMemory ?? true,
     useRetrieval: input.settings?.useRetrieval ?? runtime.documentVectorCount > 0,
-    allowedTools: input.settings?.allowedTools ?? [...ALPHA_CHAT_TOOL_ALLOWLIST],
+    allowedTools,
     sampling: samplingFrom(input.settings),
   };
 }

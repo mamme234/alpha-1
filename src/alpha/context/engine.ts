@@ -295,6 +295,28 @@ export class AlphaContextEngine {
         renderBlock(entry, { text: entry.block.text, decoration: true }),
       );
 
+      if (entry.block.pinned) {
+        // A pinned block is mandatory content. Its header is scaffolding the
+        // window may not be able to afford, and the caller's reservation for
+        // output is measured on the bare pinned content — so pinned blocks are
+        // sent without decoration, exactly as they were reserved. This is what
+        // lets a small model with a tight window still fit its instruction and
+        // the user's request instead of failing assembly.
+        if (fits(entry.block.text, false)) {
+          committed.set(entry.block.id, {
+            text: entry.block.text,
+            decoration: false,
+            status: "included",
+            reason: "pinned block included whole, without a header",
+          });
+          continue;
+        }
+        throw new AlphaValidationError(
+          "core",
+          `pinned context block "${entry.block.id}" does not fit in ${budgetTokens} tokens`,
+        );
+      }
+
       if (fits(entry.block.text, true)) {
         committed.set(entry.block.id, {
           text: entry.block.text,
@@ -315,13 +337,6 @@ export class AlphaContextEngine {
           reason: "included whole without its header, to keep room for the content",
         });
         continue;
-      }
-
-      if (entry.block.pinned) {
-        throw new AlphaValidationError(
-          "core",
-          `pinned context block "${entry.block.id}" does not fit in ${budgetTokens} tokens`,
-        );
       }
 
       // Truncate rather than drop: half a relevant document beats none. The
@@ -363,7 +378,6 @@ export class AlphaContextEngine {
     const text = render();
     const reports: ContextBlockReport[] = presentationOrder.map((entry) => {
       const value = committed.get(entry.block.id)!;
-      const headerTokens = entry.headerText ? this.countTokens(entry.headerText) : 0;
       return {
         id: entry.block.id,
         kind: entry.block.kind,

@@ -11,6 +11,7 @@ import "./index.css";
 const Landing = lazy(() => import("./pages/Landing.tsx"));
 const AuthPage = lazy(() => import("./pages/Auth.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
+const ChatPage = lazy(() => import("./pages/Chat.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
 // Simple loading fallback for route transitions
@@ -72,7 +73,18 @@ createRoot(document.getElementById("root")!).render(
           <Suspense fallback={<RouteLoading />}>
             <Routes>
               <Route path="/" element={<Landing />} />
-              <Route path="/auth" element={<AuthPage redirectAfterAuth="/dashboard" />} />
+              <Route path="/auth" element={<AuthPage redirectAfterAuth="/chat" />} />
+              <Route
+                path="/chat"
+                element={
+                  <RequireAuth
+                    title="Sign in to chat with Alpha"
+                    description="Alpha's chat runs its own trained model on the server. Sign in to open a conversation and keep the transcript."
+                  >
+                    <ChatPage />
+                  </RequireAuth>
+                }
+              />
               <Route
                 path="/dashboard"
                 element={

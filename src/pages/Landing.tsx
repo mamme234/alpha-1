@@ -62,8 +62,8 @@ export default function Landing() {
             <a href="#honesty" className="hidden text-[11px] uppercase tracking-[0.18em] text-muted-foreground transition-colors hover:text-foreground sm:inline">
               Honesty
             </a>
-            <Button variant="outline" size="sm" onClick={() => navigate("/auth?returnTo=/dashboard")}>
-              Enter studio
+            <Button size="sm" onClick={() => navigate("/auth?returnTo=/chat")}>
+              Chat with Alpha
             </Button>
           </nav>
         </div>
@@ -88,12 +88,12 @@ export default function Landing() {
                 random, the interface says <span className="text-foreground">UNTRAINED</span> — and it keeps saying it.
               </p>
               <div className="flex flex-wrap items-center gap-3">
-                <Button size="lg" onClick={() => navigate("/auth?returnTo=/dashboard")}>
-                  Open the workspace
+                <Button size="lg" onClick={() => navigate("/auth?returnTo=/chat")}>
+                  Chat with Alpha
                   <ArrowRight className="ml-2 size-4" />
                 </Button>
                 <Button size="lg" variant="outline" onClick={() => navigate("/auth?returnTo=/dashboard")}>
-                  Train Alpha in the browser
+                  Open the workspace
                 </Button>
               </div>
               <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
@@ -278,21 +278,22 @@ export default function Landing() {
             <motion.div {...fade} className="max-w-2xl space-y-4">
               <p className="studio-eyebrow">Next step</p>
               <h2 className="studio-serif text-3xl leading-tight tracking-tight">
-                Open the workspace and train it.
+                Talk to the model it trained. Then open the workshop.
               </h2>
               <p className="text-sm leading-6 text-muted-foreground">
-                The workspace trains the tokenizer, runs real gradient descent in your tab, plots the loss against a
-                uniform baseline, stores the checkpoint, and lets you talk to the model it produced — with the model's
-                actual stage attached to every answer.
+                Chat serves the verified checkpoint from Alpha's own backend — streamed token by token, stored in your
+                transcript, with the model's stage and fingerprints attached. The workspace is where you train:
+                tokenizer, real gradient descent in the tab, loss against a uniform baseline, and the checkpoint it
+                produced.
               </p>
             </motion.div>
             <motion.div {...fade} className="flex flex-wrap gap-3">
-              <Button size="lg" onClick={() => navigate("/auth?returnTo=/dashboard")}>
-                Enter the studio
+              <Button size="lg" onClick={() => navigate("/auth?returnTo=/chat")}>
+                Chat with Alpha
                 <ArrowRight className="ml-2 size-4" />
               </Button>
-              <Button size="lg" variant="outline" onClick={() => navigate("/dashboard")}>
-                View Alpha's status
+              <Button size="lg" variant="outline" onClick={() => navigate("/auth?returnTo=/dashboard")}>
+                Enter the studio
               </Button>
             </motion.div>
           </div>
