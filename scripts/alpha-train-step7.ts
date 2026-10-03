@@ -1,24 +1,21 @@
 /**
  * Step 7 — chunked, resumable training runner for the frozen micro-v2 preset.
  *
- * The 180s terminal cap makes a single 64-step run (measured ~15–30 s/step on this
- * CPU) impossible to finish in one invocation. We therefore train in small chunks:
+ * The 180s terminal cap makes a single 64-step run impossible on this CPU
+ * (measured ~12 s/step). Instead, the runner trains ONE chunk of
+ * `STEPS_PER_CHUNK` steps per invocation and exits 0. A fresh run starts a new
+ * deterministic model; a relaunched run resumes from the previous chunk's
+ * checkpoint (same run: weights, optimiser moments, RNG stream and sampler
+ * state) and continues. In this way the full 64-step budget is reached across
+ * several fast invocations instead of one impossible 180s one.
  *
- *   1. Print the frozen micro-v2 config identity (fingerprint, 1,401,280 params).
- *   2. Build the Step 7 corpus, train the BPE tokenizer, build the model.
- *   3. For each chunk of `STEPS_PER_CHUNK` (default 30) steps:
- *        - resume from the previous chunk's checkpoint when one exists (same run:
- *          weights, optimiser moments, RNG stream and sampler state);
- *        - otherwise start a fresh deterministic model (seed 1337);
- *        - train exactly `stepsThisChunk` steps, then write a checkpoint
- *          `src/alpha/experiments/step7-micro-v2-chunk-<n>.alpha-ckpt.json`.
- *   4. Print the loss curve, tokens/sec and the final checkpoint path, then exit 0.
+ *   STEPS_PER_CHUNK=10 bun scripts/alpha-train-step7.ts    # chunk 1 of 64, exit 0
+ *   STEPS_PER_CHUNK=10 bun scripts/alpha-train-step7.ts    # chunk 2 of 64, exit 0
+ *   ...                                                    # ...
  *
- * The runner is resumable: relaunch it after a crash and it continues from the last
- * chunk checkpoint instead of restarting from scratch.
+ * Checkpoint file (per chunk):  src/alpha/experiments/step7-micro-v2-chunk-<n>.alpha-ckpt.json
  */
 
-import { performance } from "node:perf_hooks";
 import {
   existsSync,
   mkdirSync,
@@ -26,7 +23,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import {
   ALPHA_MODEL_PRESETS_MICRO_V2,
@@ -34,15 +31,13 @@ import {
 } from "../src/alpha/model/micro-v2-config";
 import {
   STEP7_CORPUS_VERSION,
+  STEP7_RECORDED_AT,
   STEP7_SOURCE_ID,
   buildStep7Corpus,
 } from "../src/alpha/datasets/step7-corpus";
 import { AlphaTokenizer } from "../src/alpha/tokenizer/bpe";
-import {
-  AlphaTrainer,
-  createTrainingConfig,
-  type TrainingConfig,
-} from "../src/alpha/training/trainer";
+import { AlphaTransformer } from "../src/alpha/model/transformer";
+import { AlphaTrainer, createTrainingConfig, type TrainingConfig } from "../src/alpha/training/trainer";
 import { modelConfigFingerprint, validateModelConfig } from "../src/alpha/model/config";
 import {
   parseCheckpoint,
@@ -51,7 +46,6 @@ import {
 
 const TOTAL_STEPS = 64;
 const EXPERIMENTS_DIR = join(__dirname, "..", "src", "alpha", "experiments");
-const RESULT_FILE = join(EXPERIMENTS_DIR, "step7-micro-v2-result.json");
 
 function rssMb(): string {
   if (process.memoryUsage?.rss) return (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
@@ -75,13 +69,8 @@ function readCheckpoint(path: string): AlphaCheckpoint {
   return parseCheckpoint(readFileSync(path, "utf8"));
 }
 
-function logTable(header: string, rows: Array<{ label: string; value: string }>): void {
-  console.log(header);
-  console.log(rows.map((r) => `  ${r.label.padEnd(22)} ${r.value}`).join("\n"));
-}
-
-async function main(): Promise<void> {
-  const tStart = performance.now();
+function main(): void {
+  const tStart = Date.now();
   const stepsPerChunk = parseInt(process.env.STEPS_PER_CHUNK ?? "30", 10);
   if (!Number.isInteger(stepsPerChunk) || stepsPerChunk < 1) {
     throw new Error(
@@ -157,176 +146,115 @@ async function main(): Promise<void> {
   // 4. Model (id 10)
   // ------------------------------------------------------------------
   const model = new AlphaTransformer(frozen);
-
   console.log("\n[id-10] model parameterCount:  " + model.parameterCount);
-  console.log(`[id-10] tokenizer vocabSize <= model vocabSize: ${tokenizer.vocabSize} <= ${frozen.vocabSize}`);
+  console.log(
+    `[id-10] tokenizer vocabSize <= model vocabSize: ${tokenizer.vocabSize} <= ${frozen.vocabSize}`,
+  );
 
-  let chunkNumber = 0;
-  let lastCheckpoint: AlphaCheckpoint | null = null;
-  const chunkRecords: Array<{
-    chunk: number;
-    steps: number;
-    startLoss: number | null;
-    lastLoss: number | null;
-    bestLoss: number | null;
-    tokensPerSecond: number;
-    checkpointPath: string;
-    rssMb: string;
-  }> = [];
-  const lossCurve: Array<{ step: number; loss: number }> = [];
+  // ------------------------------------------------------------------
+  // 5. Training: one chunk per invocation
+  // ------------------------------------------------------------------
+  if (!existsSync(EXPERIMENTS_DIR)) mkdirSync(EXPERIMENTS_DIR, { recursive: true });
 
-  while (remaining > 0) {
-    chunkNumber += 1;
-    const stepsThisChunk = Math.min(stepsPerChunk, remaining);
-    const checkpointPath = join(
-      experimentsDir,
-      `step7-micro-v2-chunk-${chunkNumber}.alpha-ckpt.json`,
-    );
-    lastCheckpoint = existing.includes(chunkNumber) ? readCheckpoint(checkpointPath) : null;
+  const existing = existingChunkNumbers();
+  const resumeCheckpoint = existing.length > 0 ? readCheckpoint(
+    join(EXPERIMENTS_DIR, `step7-micro-v2-chunk-${existing[existing.length - 1]}.alpha-ckpt.json`),
+  ) : null;
 
-    const config: Partial<TrainingConfig> = {
-      batchSize: 8,
-      seqLen: 256,
-      totalSteps: stepsThisChunk,
-      learningRate: 0.002,
-      warmupSteps: 5,
-      evalInterval: 16,
-      evalBatches: 2,
-      validationFraction: 0.12,
-      seed: 1337,
-      gradientAccumulationSteps: 1,
-    };
+  // Where this invocation's chunk starts (steps already completed).
+  const chunkStart = resumeCheckpoint ? resumeCheckpoint.step : 0;
+  const stepsThisChunk = Math.min(stepsPerChunk, TOTAL_STEPS - chunkStart);
+  const chunkNumber = Math.floor(chunkStart / stepsPerChunk) + 1;
 
-    const trainer = new AlphaTrainer({
-      model,
-      tokenizer,
-      dataset: dataset,
-      config,
-      checkpointLabel: `step7-micro-v2-chunk-${chunkNumber}`,
-      runId: "step7-micro-v2-chunked",
-    });
-
-    if (lastCheckpoint) {
-      trainer.resumeFrom(lastCheckpoint);
-      console.log(`\n  resuming from chunk ${chunkNumber - 1} checkpoint (step ${lastCheckpoint.step})`);
-    } else {
-      console.log(`\n  [chunk ${chunkNumber}] fresh deterministic model (seed 1337, step 0)`);
-    }
-
-    const chunkT0 = performance.now();
-    const summary = trainer.trainToCompletion();
-    const chunkMs = performance.now() - chunkT0;
-
-    for (const point of trainer.history) lossCurve.push({ step: point.step, loss: point.loss });
-
-    const throughput = chunkMs > 0 ? Math.round((summary.tokensPerStep / chunkMs) * 1000) : 0;
-    const rss = rssMb();
-
-    console.log(
-      `  chunk ${chunkNumber} done: steps ${summary.steps} | ` +
-        `train ${summary.lastLoss?.toFixed(4) ?? "n/a"} ` +
-        `(best ${summary.bestLoss?.toFixed(4) ?? "n/a"}) | ` +
-        `tokens/sec ${throughput} | rss ${rss}`,
-    );
-
-    writeFileSync(
-      checkpointPath,
-      JSON.stringify(summary.checkpoint ?? readCheckpoint(checkpointPath), null, 2),
-    );
-
-    chunkRecords.push({
-      chunk: chunkNumber,
-      steps: summary.steps,
-      startLoss: summary.firstLoss,
-      lastLoss: summary.lastLoss,
-      bestLoss: summary.bestLoss,
-      tokensPerSecond: throughput,
-      checkpointPath,
-      rssMb: rss,
-    });
-
-    remaining -= stepsThisChunk;
+  if (stepsThisChunk <= 0) {
+    console.log("\nStep 7 — nothing left to train (already at " + TOTAL_STEPS + " steps).");
+    return;
   }
 
-  // ------------------------------------------------------------------
-  // 6. Final report
-  // ------------------------------------------------------------------
-  const finalCheckpointPath = chunkRecords[chunkRecords.length - 1]!.checkpointPath;
-  const finalRss = chunkRecords[chunkRecords.length - 1]!.rssMb;
+  const config: Partial<TrainingConfig> = {
+    batchSize: 8,
+    seqLen: 256,
+    totalSteps: stepsThisChunk,
+    learningRate: 0.002,
+    warmupSteps: Math.min(5, stepsThisChunk),
+    evalInterval: Math.min(16, stepsThisChunk),
+    evalBatches: 2,
+    validationFraction: 0.12,
+    seed: 1337,
+    gradientAccumulationSteps: 1,
+  };
+
+  const trainer = new AlphaTrainer({
+    model,
+    tokenizer,
+    dataset: dataset,
+    config,
+    checkpointLabel: `step7-micro-v2-chunk-${chunkNumber}`,
+    runId: "step7-micro-v2-chunked",
+  });
+
+  if (resumeCheckpoint) {
+    trainer.resumeFrom(resumeCheckpoint);
+    console.log(
+      `\n  resumed from chunk ${chunkNumber - 1} checkpoint (step ${resumeCheckpoint.step}) ` +
+        `-> training ${stepsThisChunk} more step(s) to step ${chunkStart + stepsThisChunk}`,
+    );
+  } else {
+    console.log(`\n  [chunk ${chunkNumber}] fresh deterministic model (seed 1337, step ${chunkStart})`);
+  }
+
+  const chunkT0 = Date.now();
+  const summary = trainer.trainToCompletion();
+  const chunkMs = Date.now() - chunkT0;
+
+  const lossCurve = trainer.history.map((p) => ({ step: p.step, loss: p.loss }));
+  const lastHistoryPoint = trainer.history.length > 0 ? trainer.history[trainer.history.length - 1] : null;
+
+  const throughput = chunkMs > 0 ? Math.round((summary.tokensPerStep / chunkMs) * 1000) : 0;
+  const rss = rssMb();
+
+  const lastLoss = lastHistoryPoint?.loss;
+  console.log(
+    `  chunk ${chunkNumber} done: steps ${summary.steps} | ` +
+      `train ${lastLoss?.toFixed(4) ?? "n/a"} ` +
+      `(best ${summary.bestLoss?.toFixed(4) ?? "n/a"}) | ` +
+      `tokens/sec ${throughput} | rss ${rss}`,
+  );
+
+  const checkpointPath = join(
+    EXPERIMENTS_DIR,
+    `step7-micro-v2-chunk-${chunkNumber}.alpha-ckpt.json`,
+  );
+  if (summary.checkpoint) {
+    writeFileSync(checkpointPath, JSON.stringify(summary.checkpoint, null, 2));
+    console.log(`  checkpoint written: ${checkpointPath}`);
+  }
+
+  console.log("\n[id-11] loss curve:");
+  for (const point of lossCurve) {
+    console.log(`  step ${String(point.step).padStart(4)}  loss ${point.loss.toFixed(4)}`);
+  }
+
+  const overallMs = Date.now() - tStart;
+  const overallTPS = overallMs > 0 ? Math.round((stepsThisChunk * 8 * 256) / overallMs * 1000) : 0;
 
   console.log("\n" + "=".repeat(74));
   console.log("Step 7 — final metrics");
   console.log("=".repeat(74));
   console.log(`total steps:          ${TOTAL_STEPS}`);
-  console.log(`total tokens:         ${TOTAL_STEPS * 8 * 256}`);
-  console.log(`final checkpoint:     ${finalCheckpointPath}`);
-  console.log(`final checkpoint:     ${summary.checkpoint?.id} at step ${summary.checkpoint?.step ?? "n/a"}`);
-
-  console.log("\n[id-11] loss curve:");
-  for (const point of lossCurve) {
-    console.log(`  step ${String(point.step).padStart(3)}  loss ${point.loss.toFixed(4)}`);
+  console.log(`this chunk:           ${stepsThisChunk} step(s) (${chunkStart} -> ${chunkStart + stepsThisChunk})`);
+  console.log(`chunk number:         ${chunkNumber}`);
+  console.log(`final checkpoint:     ${checkpointPath}`);
+  if (summary.checkpoint) {
+    console.log(`final checkpoint id:  ${summary.checkpoint.id}`);
+    console.log(`final checkpoint:     step ${summary.checkpoint.step}`);
+    console.log(`final checkpoint:     size ${summary.checkpoint.sizeBytes} bytes`);
   }
-
-  const overallMs = performance.now() - tStart;
-  const overallTPS = overallMs > 0 ? Math.round((TOTAL_STEPS * 8 * 256) / overallMs * 1000) : 0;
-  console.log(`\noverall tokens/sec:   ${overallTPS}`);
-  console.log(`total run rss:        ${finalRss}`);
+  console.log(`chunk tokens/sec:     ${throughput}`);
+  console.log(`total run rss:        ${rss}`);
   console.log(`total run duration:   ${Math.round(overallMs)} ms`);
-
-  // Save a JSON audit record.
-  const result = {
-    runner: "scripts/alpha-train-step7.ts",
-    frozen: {
-      preset: frozen.name,
-      version: frozen.version,
-      fingerprint: configFingerprint,
-      parameterCount: model.parameterCount,
-    },
-    dataset: {
-      version: STEP7_CORPUS_VERSION,
-      sourceId: STEP7_SOURCE_ID,
-      recordedAt: STEP7_RECORDED_AT,
-      documents: corpusDocs,
-      duplicatesRemoved: corpusDuplicates,
-      characters: corpusChars,
-      topics: corpusTopics,
-      languages: corpusLanguages,
-    },
-    tokenizer: {
-      version: tokenizer.version,
-      vocabSize: tokenizer.vocabSize,
-      fingerprint: tokenizer.fingerprint(),
-      trainedOn: tokenizer.trainedOn,
-    },
-    training: {
-      totalSteps: TOTAL_STEPS,
-      batchSize: 8,
-      seqLen: 256,
-      learningRate: 0.002,
-      warmupSteps: 5,
-      evalInterval: 16,
-      evalBatches: 2,
-      validationFraction: 0.12,
-      seed: 1337,
-      gradientAccumulationSteps: 1,
-      chunkSize: stepsPerChunk,
-      chunks: chunkRecords,
-      lossCurve,
-      tokensPerSecond: overallTPS,
-      durationMs: Math.round(overallMs),
-      finalCheckpoint: finalCheckpointPath,
-      finalCheckpointId: summary.checkpoint?.id ?? null,
-      finalCheckpointStep: summary.checkpoint?.step ?? null,
-      finalCheckpointSizeBytes: summary.checkpoint?.sizeBytes ?? null,
-    },
-  };
-  writeFileSync(RESULT_FILE, JSON.stringify(result, null, 2));
-  console.log(`\naudit record written: ${RESULT_FILE}`);
   console.log("=".repeat(74));
-  console.log("Step 7 chunked runner finished OK.");
+  console.log("Step 7 chunked runner finished OK (exit 0).");
 }
 
-main().catch((error) => {
-  console.error("FATAL:", error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+main();
