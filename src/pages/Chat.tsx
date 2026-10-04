@@ -100,6 +100,9 @@ export default function Chat() {
   }, [chat]);
 
   const status = chat.modelStatus;
+  // Read the window from the served model itself, so the copy cannot drift
+  // from the artifact the backend actually loaded.
+  const contextWindow = status !== null && status.available ? status.limits.contextLength : 96;
   const statusLabel =
     status === null
       ? "checking model…"
@@ -337,7 +340,7 @@ export default function Chat() {
                   ref={textareaRef}
                   value={draft}
                   rows={2}
-                  placeholder="Ask Alpha — short prompts fit its 256-token window best."
+                  placeholder={`Ask Alpha — short prompts fit its ${contextWindow}-token window best.`}
                   className="min-h-[44px] resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => {
@@ -367,7 +370,7 @@ export default function Chat() {
                 <span>
                   {chat.streaming
                     ? "generating on the server"
-                    : "256-token window · answers come from Alpha's own weights"}
+                    : `${contextWindow}-token window · answers come from Alpha's own weights`}
                 </span>
               </div>
             </div>

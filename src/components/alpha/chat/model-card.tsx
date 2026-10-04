@@ -4,8 +4,8 @@
  * Every value on this card comes from `alpha.chat:modelStatus`, which reads the
  * loaded serving artefact — the fingerprints, the training run, the evaluation
  * gate and the live token budget. The card states the weak part too: Alpha's
- * answers come from a real model that was trained for 64 steps, so they are
- * real and poor; the note at the bottom says exactly that.
+ * answers come from a real model that was trained for a small number of steps,
+ * so they are real and poor; the note at the bottom says exactly that.
  */
 
 import { KeyValue, Mono, StageBadge, Stat, StatGrid, WarningNote } from "@/components/alpha/studio";
