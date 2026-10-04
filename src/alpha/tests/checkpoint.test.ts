@@ -237,7 +237,6 @@ describe("alpha checkpoint system", () => {
   it("resumes with sampler state so windows and dropout continue exactly", () => {
     const { checkpoint, tokenizer } = trainedCheckpoint();
     const { seedCorpusSlice, TRAINING } = requireTestHelpers();
-    const { AlphaTrainer } = require("../training/trainer");
     const fresh = new AlphaTransformer(checkpoint.config);
     const resumed = new AlphaTrainer({
       model: fresh,
@@ -249,11 +248,21 @@ describe("alpha checkpoint system", () => {
       isFineTune: true,
     });
     resumed.resumeFrom(checkpoint);
-    // Verify the saved sampler state is loaded, so the first window after
-    // resume is the same window the continuous run would draw.
-    resumed.sampler.next();
+    // The saved sampler state is loaded exactly, so the two resumed steps draw
+    // the windows the continuous run would have drawn next, instead of
+    // restarting the window schedule from the sampler's initial position.
+    // One step draws one window, which consumes one start index per sequence
+    // in the batch — so two steps must advance the state by exactly
+    // `2 * batchSize` calls from the state the checkpoint recorded.
     expect(resumed.step).toBe(6);
-    expect(resumed.sampler.saveState()).toEqual(checkpoint.sampler);
+    resumed.trainToCompletion();
+    expect(resumed.step).toBe(8);
+    const after = resumed.buildCheckpoint().sampler;
+    if (!checkpoint.sampler || !after) {
+      throw new Error("the checkpoint and the resumed run must both carry sampler state");
+    }
+    expect(after.seed).toBe(checkpoint.sampler.seed);
+    expect(after.calls).toBe(checkpoint.sampler.calls + 2 * checkpoint.trainingConfig.batchSize);
   });
 
   it("encodes the corpus it recorded", () => {

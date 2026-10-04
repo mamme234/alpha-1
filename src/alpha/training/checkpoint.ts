@@ -165,6 +165,7 @@ export function createCheckpoint(input: CreateCheckpointInput): AlphaCheckpoint 
     weights: input.weights,
     optimizer: input.optimizer,
     rng: input.rng ?? null,
+    sampler: input.sampler ?? null,
     createdAt: input.createdAt ?? Date.now(),
     sizeBytes,
     stage: input.step > 0 ? (input.isFineTune ? "fine-tuned" : "trained") : "untrained",
