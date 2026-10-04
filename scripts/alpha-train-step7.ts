@@ -174,7 +174,15 @@ function main(): void {
   const config: Partial<TrainingConfig> = {
     batchSize: 8,
     seqLen: 256,
-    totalSteps: stepsThisChunk,
+    // The trainer's run loop ends at config.totalSteps.  It must be the FULL
+    // step budget (TOTAL_STEPS), not this chunk's slice: on resume
+    // `resumeFrom` already restored `stepCount` to the number of steps the
+    // previous chunk completed, so a chunk-local totalSteps would make the
+    // run loop stop immediately with an empty history and the final
+    // buildCheckpoint would record a NaN trainLoss.  With the full budget the
+    // resumed trainer re-runs its steps, populates history, and writes a
+    // finite training loss.
+    totalSteps: TOTAL_STEPS,
     learningRate: 0.002,
     warmupSteps: Math.min(5, stepsThisChunk),
     evalInterval: Math.min(16, stepsThisChunk),
