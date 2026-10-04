@@ -1,7 +1,7 @@
 /**
  * Alpha's chat API — the server side of the product.
  *
- * This module is where the verified Step 5 model becomes a real chat service.
+ * This module is where the verified Step 7 model becomes a real chat service.
  * A Convex action cannot push to a browser, so the shape is:
  *
  *   client action call ──► load the serving runtime (per account)
@@ -13,7 +13,7 @@
  *                          persist the assistant message
  *                          finalize the stream row last
  *
- * Every step is Alpha's own code: the weights come from the checked-in Step 5
+ * Every step is Alpha's own code: the weights come from the checked-in Step 7
  * serving artefact, embeddings come from Alpha's transformer, retrieval comes
  * from Alpha's vector store. There is no external model and no provider key
  * anywhere in this file.
@@ -47,7 +47,7 @@ import { buildChatRequest, type ChatHistoryTurn, type ChatTurnSettings } from ".
 import type { RespondRequest, RespondResult } from "../../alpha/runtime/orchestrator";
 import { authReject } from "../alphaAuth/validation";
 import { requireActorId } from "./helpers";
-import STEP5_ARTIFACT from "../../alpha/serving/step5-artifact.json";
+import STEP7_ARTIFACT from "../../alpha/serving/step7-artifact.json";
 
 /* -------------------------------------------------------------------------- */
 /* Runtime cache                                                               */
@@ -68,10 +68,10 @@ const actorRuntimes = new Map<string, AlphaServingRuntime>();
 let statusRuntime: AlphaServingRuntime | null = null;
 
 export const ALPHA_ARTIFACT_IMPORT_PROVENANCE =
-  "src/alpha/serving/step5-artifact.json — the artefact alpha:verify-capability wrote";
+  "src/alpha/serving/step7-artifact.json — built by scripts/alpha-build-step7-artifact.ts from the verified step-7 checkpoint ckpt_mutfvpv45sqe7 (frozen suite evl_b58eacf7; gate gate_9ab33311 not met, recorded as measured)";
 
 function buildRuntime(): AlphaServingRuntime {
-  return createServingRuntime({ artifact: STEP5_ARTIFACT, logLevel: "warn" });
+  return createServingRuntime({ artifact: STEP7_ARTIFACT, logLevel: "warn" });
 }
 
 /** Load (or reuse) the serving runtime for an account. Throws on a bad artefact. */

@@ -337,7 +337,7 @@ export default function Chat() {
                   ref={textareaRef}
                   value={draft}
                   rows={2}
-                  placeholder="Ask Alpha — short prompts fit its 96-token window best."
+                  placeholder="Ask Alpha — short prompts fit its 256-token window best."
                   className="min-h-[44px] resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => {
@@ -367,7 +367,7 @@ export default function Chat() {
                 <span>
                   {chat.streaming
                     ? "generating on the server"
-                    : "96-token window · answers come from Alpha's own weights"}
+                    : "256-token window · answers come from Alpha's own weights"}
                 </span>
               </div>
             </div>

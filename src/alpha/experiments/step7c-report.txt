@@ -1,0 +1,80 @@
+Step 7C — frozen evaluation report
+==========================================================================
+writtenAt: 2026-10-04T09:10:08.388Z
+
+candidate checkpoint:
+  /home/daytona/codebase/src/alpha/experiments/step7-micro-v2-chunk-32.alpha-ckpt.json
+  {"id":"ckpt_mutfvpv45sqe7","step":64,"tokensSeen":131072,"configFingerprint":"cfg_dc35f555","trainLoss":4.012804198044572}
+
+suite reconstruction:
+  candidate suite fingerprint: evl_b58eacf7
+  recorded baseline fingerprint: evl_b58eacf7
+  matches recorded: true
+  baseline re-run deltas vs recorded (same reconstructed suite): loss 0.000000000000, ppl 0.000000000000, top1 0.000000000000
+
+candidate · main suite (raw):
+  {"loss":4.557843785755046,"perplexity":95.37760340587809,"nextTokenTop1Accuracy":0.2929175167589624,"positions":6862,"uniformLoss":6.643789733147672,"tokens":6862}
+  language-modeling: cases 39 nll null top1 null matched null format null repeat 0 3gram null
+  completion: cases 6 nll 4.1668675575105905 top1 0.3775987004188224 matched null format null repeat 0 3gram 0.9158905228758171
+  instruction-following: cases 6 nll 4.6298418018895005 top1 0.2874881113039008 matched null format {"total":6,"value":2} repeat 0 3gram 0.9011351909184726
+  question-answering: cases 6 nll 4.268819066206008 top1 0.36816115921209175 matched {"total":6,"value":0} format null repeat 0.014184397163120567 3gram 0.8407135076252724
+  summarization: cases 3 nll null top1 null matched null format {"total":3,"value":3} repeat 0 3gram 0.9249084249084248
+  structured-output: cases 5 nll null top1 null matched null format {"total":5,"value":0} repeat 0.02127659574468085 3gram 0.8100877192982455
+  context-retention: cases 7 nll 5.475467873600775 top1 0.20053606237816762 matched {"total":7,"value":0} format null repeat 0.0060790273556231 3gram 0.8984409553295003
+  generation-quality: cases 5 nll null top1 null matched null format {"total":4,"value":3} repeat 0 3gram 0.8629411764705882
+
+baseline re-run · main suite (raw):
+  {"loss":4.38888226840836,"perplexity":80.55033499085867,"nextTokenTop1Accuracy":0.31727651690597497,"positions":6477,"uniformLoss":6.643789733147672,"tokens":6477}
+
+candidate · extension suite (raw):
+  extension suite fingerprint: s7e_f26d053a
+  mathematics 7.1559323555110055
+  reasoning 5.714354876378535
+  coding 6.459521600168696
+
+gate (frozen) — baseline re-run on reconstructed suite vs candidate:
+Step 7 capability gate NOT MET — gate_9ab33311
+  suite: evl_b58eacf7 (baseline evl_b58eacf7)
+  not met: required criteria failed: held-out-loss, held-out-perplexity — these must pass whatever else improved
+  must pass: held-out-loss, held-out-perplexity, generation-repetition
+
+  criteria (counted, never summed):
+    [ ] held-out-loss: frozen held-out language-modelling loss falls by at least 0.10 nats · baseline 4.38888 -> candidate 4.55784 · improvement -0.16896 (-3.85%) · required 0.1 · not satisfied
+    [ ] held-out-perplexity: frozen held-out perplexity falls by at least 10% (and 0.5 in absolute terms) · baseline 80.55033 -> candidate 95.37760 · improvement -14.82727 (-18.41%) · required 0.5 and 10% · not satisfied
+    [ ] next-token-accuracy: exact next-token accuracy rises by at least two percentage points · baseline 0.31728 -> candidate 0.29292 · improvement -0.02436 (-7.68%) · required 0.02 · not satisfied
+    [ ] completion: cross entropy on expected completions falls by at least 0.05 nats · baseline 4.21663 -> candidate 4.16687 · improvement 0.04976 (1.18%) · required 0.05 · not satisfied
+    [ ] question-answering: cross entropy on expected answers to held-out questions falls by 0.05 nats · baseline 4.29108 -> candidate 4.26882 · improvement 0.02226 (0.52%) · required 0.05 · not satisfied
+    [ ] context-retention: cross entropy on answers drawn from earlier context falls by 0.05 nats · baseline 5.29797 -> candidate 5.47547 · improvement -0.17750 (-3.35%) · required 0.05 · not satisfied
+    [ ] instruction-following: cross entropy on expected responses to instructions falls by 0.05 nats · baseline 4.57902 -> candidate 4.62984 · improvement -0.05082 (-1.11%) · required 0.05 · not satisfied
+    [ ] mathematics: not evaluated: the baseline produced no value for mathematics.meanContinuationNll
+    [x] generation-repetition: generation does not repeat itself more than the baseline · baseline 0.11603 -> candidate 0.00000 · improvement 0.11603 (100.00%) · required 0 · SATISFIED
+    [x] generation-diversity: generated text is no less varied than the baseline · baseline 0.76398 -> candidate 0.86294 · improvement 0.09896 (12.95%) · required 0 · SATISFIED
+
+  passing does not mean:
+    - It does not mean the model produces coherent general-purpose language.
+    - It does not mean the model is useful, safe, or ready to serve anyone.
+    - It does not mean the model understands anything; it means specific numbers moved.
+    - It does not mean the measurement suite is a benchmark of intelligence.
+    - It does not authorise promotion to PRODUCTION, which stays an explicit operator decision.
+
+[verdict] not met: required criteria failed: held-out-loss, held-out-perplexity — these must pass whatever else improved
+[gate] gate_9ab33311
+[suites] baseline evl_b58eacf7 vs candidate evl_b58eacf7 — match: true
+
+supplementary gate vs recorded trio:
+  not met: required criteria failed: held-out-loss, held-out-perplexity — these must pass whatever else improved
+  [ ] held-out-loss: frozen held-out language-modelling loss falls by at least 0.10 nats · baseline 4.38888 -> candidate 4.55784 · improvement -0.16896 (-3.85%) · required 0.1 · not satisfied
+  [ ] held-out-perplexity: frozen held-out perplexity falls by at least 10% (and 0.5 in absolute terms) · baseline 80.55033 -> candidate 95.37760 · improvement -14.82727 (-18.41%) · required 0.5 and 10% · not satisfied
+  [ ] next-token-accuracy: exact next-token accuracy rises by at least two percentage points · baseline 0.31728 -> candidate 0.29292 · improvement -0.02436 (-7.68%) · required 0.02 · not satisfied
+  [ ] completion: not evaluated: the baseline produced no value for completion.meanContinuationNll
+  [ ] question-answering: not evaluated: the baseline produced no value for question-answering.meanContinuationNll
+  [ ] context-retention: not evaluated: the baseline produced no value for context-retention.meanContinuationNll
+  [ ] instruction-following: not evaluated: the baseline produced no value for instruction-following.meanContinuationNll
+  [ ] mathematics: not evaluated: the baseline produced no value for mathematics.meanContinuationNll
+  [x] generation-repetition: generation does not repeat itself more than the baseline · baseline 0.00000 -> candidate 0.00000 · improvement 0.00000 · required 0 · SATISFIED
+  [ ] generation-diversity: not evaluated: the baseline produced no value for generation-quality.meanDistinctTrigramRatio
+
+limitations:
+  - the reconstruction path is a copy of the Step 5 pipeline; if the suite fingerprint does not match evl_b58eacf7, the main-suite comparison is between arms measured now, not the recorded run
+  - the baseline re-run cross-check shows whether recorded numbers reproduce on this machine
+  - the extension suite is step-7-only; no baseline extension numbers exist, so the gate's mathematics criterion is not evaluable against the baseline
