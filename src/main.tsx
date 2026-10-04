@@ -1,7 +1,7 @@
 import { Toaster } from "@/components/ui/sonner";
 import { RequireAuth } from "@/components/RequireAuth";
 import { AlphaAuthProvider } from "@/hooks/use-auth";
-import { ConvexReactClient } from "convex/react";
+import { ConvexProvider, ConvexReactClient } from "convex/react";
 import React, { StrictMode, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router";
@@ -66,39 +66,43 @@ const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <RootErrorBoundary>
-      {/* Alpha owns accounts and sessions; nothing here depends on a provider. */}
-      <AlphaAuthProvider>
-        <BrowserRouter>
-          <Suspense fallback={<RouteLoading />}>
-            <Routes>
-              <Route path="/" element={<Landing />} />
-              <Route path="/auth" element={<AuthPage redirectAfterAuth="/chat" />} />
-              <Route
-                path="/chat"
-                element={
-                  <RequireAuth
-                    title="Sign in to chat with Alpha"
-                    description="Alpha's chat runs its own trained model on the server. Sign in to open a conversation and keep the transcript."
-                  >
-                    <ChatPage />
-                  </RequireAuth>
-                }
-              />
-              <Route
-                path="/dashboard"
-                element={
-                  <RequireAuth>
-                    <Dashboard />
-                  </RequireAuth>
-                }
-              />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </Suspense>
-        </BrowserRouter>
-        <Toaster />
-      </AlphaAuthProvider>
-    </RootErrorBoundary>
+    <ConvexProvider client={convex}>
+      <RootErrorBoundary>
+        {/* Convex hooks — including AlphaAuthProvider's useAction calls —
+            require the client above them in the tree, so the provider wraps
+            the whole app, below the error boundary and above auth. */}
+        <AlphaAuthProvider>
+          <BrowserRouter>
+            <Suspense fallback={<RouteLoading />}>
+              <Routes>
+                <Route path="/" element={<Landing />} />
+                <Route path="/auth" element={<AuthPage redirectAfterAuth="/chat" />} />
+                <Route
+                  path="/chat"
+                  element={
+                    <RequireAuth
+                      title="Sign in to chat with Alpha"
+                      description="Alpha's chat runs its own trained model on the server. Sign in to open a conversation and keep the transcript."
+                    >
+                      <ChatPage />
+                    </RequireAuth>
+                  }
+                />
+                <Route
+                  path="/dashboard"
+                  element={
+                    <RequireAuth>
+                      <Dashboard />
+                    </RequireAuth>
+                  }
+                />
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </Suspense>
+          </BrowserRouter>
+          <Toaster />
+        </AlphaAuthProvider>
+      </RootErrorBoundary>
+    </ConvexProvider>
   </StrictMode>,
 );
