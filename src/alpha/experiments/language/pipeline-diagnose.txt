@@ -1,0 +1,244 @@
+
+==========================================================================
+STAGE 0 — load final checkpoint (read-only)
+==========================================================================
+checkpoint file        : /home/daytona/codebase/src/alpha/experiments/language/language-mv2-final.alpha-ckpt.json
+checkpoint id          : ckpt_mutvuzp82esdx
+runId                  : alpha-language-mv2
+step / tokensSeen      : 1020 / 1044480
+metrics.trainLoss      : 2.8329354195718364
+metrics.validationLoss : 3.772794616215317
+metrics.uniformLoss    : 6.643789733147672
+model                  : alpha-micro-v2 @ 0.1.0
+params                 : 1401280
+configFingerprint      : cfg_dc35f555
+
+==========================================================================
+STAGE 1 — tokenizer identity and special-token ids
+==========================================================================
+tokenizer version      : 1.0.0
+recorded fingerprint   : tok_264201a3
+recomputed fingerprint : tok_264201a3
+fingerprint match      : YES
+checkpoint vocabSize   : 768
+model config vocabSize : 768
+tokenizer tokens[] len : 768
+vocab agreement        : YES (768 = 768 = 768)
+specialTokens (strings): "{\"pad\":\"<pad>\",\"unk\":\"<unk>\",\"bos\":\"<bos>\",\"eos\":\"<eos>\"}"
+PAD  id = 0  -> "<pad>"
+UNK  id = 1  -> "<unk>"
+BOS  id = 2  -> "<bos>"
+EOS  id = 3  -> "<eos>"
+expected PAD/UNK/BOS/EOS: 0/1/2/3 -> MATCH
+
+engine bans padId=0 during selection; engine stops on eosId=3
+ids inside vocab       : true
+
+==========================================================================
+STAGE 2 — encode -> ids -> decode round-trip (per prompt)
+==========================================================================
+
+prompt      : "Hello"
+ids         : [2, 45, 466, 170]
+as strings  : "<bos>" "H" "el" "lo"
+decode(ids) : "Hello"
+exact RT    : YES
+RT w/o BOS  : YES
+unknown tok : 0
+
+prompt      : "Hi, I want to ask you something."
+ids         : [2, 45, 77, 17, 5, 46, 5, 91, 665, 5, 145, 5, 330, 5, 233, 5, 290, 153, 257, 19]
+as strings  : "<bos>" "H" "i" "," " " "I" " " "w" "ant" " " "to" " " "ask" " " "you" " " "so" "me" "thing" "."
+decode(ids) : "Hi, I want to ask you something."
+exact RT    : YES
+RT w/o BOS  : YES
+unknown tok : 0
+
+prompt      : "What is Alpha?"
+ids         : [2, 522, 5, 140, 5, 692, 36]
+as strings  : "<bos>" "What" " " "is" " " "Alpha" "?"
+decode(ids) : "What is Alpha?"
+exact RT    : YES
+RT w/o BOS  : YES
+unknown tok : 0
+
+prompt      : "Tell me about Ethiopia."
+ids         : [2, 57, 73, 252, 5, 153, 5, 395, 5, 42, 131, 77, 368, 77, 69, 19]
+as strings  : "<bos>" "T" "e" "ll" " " "me" " " "about" " " "E" "th" "i" "op" "i" "a" "."
+decode(ids) : "Tell me about Ethiopia."
+exact RT    : YES
+RT w/o BOS  : YES
+unknown tok : 0
+
+==========================================================================
+STAGE 3 — TEACHER FORCED next-token prediction (held-out corpus)
+==========================================================================
+held-out windows       : 8 (ctx=256)
+teacher-forced tokens  : 2048
+teacher-forced NLL     : 3.3214
+teacher-forced ppl     : 27.70
+checkpoint val NLL     : 3.772794616215317
+uniform (random) NLL   : 6.6438
+top-1 accuracy         : 40.77%
+
+EOS targets            : 10, predicted correctly 3, mean rank 0.9 / 768
+correct non-EOS predictions (context):
+   actual " " (5)  top1 " " (5)
+   actual " " (5)  top1 " " (5)
+   actual " " (5)  top1 " " (5)
+   actual "the" (133)  top1 "the" (133)
+   actual " " (5)  top1 " " (5)
+   actual " " (5)  top1 " " (5)
+   actual " " (5)  top1 " " (5)
+   actual " " (5)  top1 " " (5)
+   actual " " (5)  top1 " " (5)
+   actual "the" (133)  top1 "the" (133)
+   actual " " (5)  top1 " " (5)
+   actual " " (5)  top1 " " (5)
+
+VERDICT teacher forcing: the weights DO model the corpus; next-token prediction works
+
+==========================================================================
+STAGE 4/5/6 — logits -> selection -> decode, per prompt (autoregressive)
+==========================================================================
+
+----------------------------------------------------------------------
+prompt: "Hello"
+prompt ids (4) : [2, 45, 466, 170]
+logit row: max=5.4121 logZ=6.7618 range=18.7781
+top-10 next-token candidates:
+   # 1 id=  5 p=0.2593 " "
+   # 2 id= 19 p=0.0651 "."
+   # 3 id=533 p=0.0468 "ci"
+   # 4 id= 94 p=0.0380 "z"
+   # 5 id= 31 p=0.0263 ":"
+   # 6 id= 75 p=0.0211 "g"
+   # 7 id= 79 p=0.0188 "k"
+   # 8 id= 71 p=0.0160 "c"
+   # 9 id= 73 p=0.0158 "e"
+   #10 id=222 p=0.0129 "ve"
+ranks — EOS(3)=154  UNK(1)=696  BOS(2)=638  PAD(0)=banned
+
+SELECTION greedy argmax -> id 5 = " "
+
+  [greedy] stopReason=max-tokens generated=40 meanNll=1.526
+    selected ids + strings: 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a"
+    decode(ids)            : " a a a a a a a a a a a a a a a a a a a a"
+    decode(ids, keepSpecial): " a a a a a a a a a a a a a a a a a a a a"
+    all-selected-are-special: false  (true => decode() legitimately yields "")
+
+  [balanced] stopReason=eos generated=31 meanNll=2.713
+    selected ids + strings: 5:" " 73:"e" 69:"a" 5:" " 71:"c" 177:"ad" 19:"." 5:" " 80:"l" 177:"ad" 75:"g" 89:"u" 222:"ve" 5:" " 187:"po" 139:"an" 19:"." 5:" " 41:"D" 83:"o" 5:" " 57:"T" 73:"e" 79:"k" 87:"s" 155:"ent" 89:"u" 165:"ch" 88:"t" 140:"is" 19:"."
+    decode(ids)            : " ea cad. ladguve poan. Do Teksentuchtis."
+    decode(ids, keepSpecial): " ea cad. ladguve poan. Do Teksentuchtis."
+    all-selected-are-special: false  (true => decode() legitimately yields "")
+
+----------------------------------------------------------------------
+prompt: "Hi, I want to ask you something."
+prompt ids (20) : [2, 45, 77, 17, 5, 46, 5, 91, 665, 5, 145, 5, 330, 5, 233, 5, 290, 153, 257, 19]
+logit row: max=10.7204 logZ=11.0351 range=25.1015
+top-10 next-token candidates:
+   # 1 id=  3 p=0.7301 "<eos>"
+   # 2 id=  4 p=0.1715 "\n"
+   # 3 id=  5 p=0.0755 " "
+   # 4 id=  2 p=0.0102 "<bos>"
+   # 5 id= 97 p=0.0013 "}"
+   # 6 id=205 p=0.0012 "ther"
+   # 7 id=107 p=0.0006 "ç"
+   # 8 id=  7 p=0.0006 "\""
+   # 9 id=575 p=0.0005 "count"
+   #10 id= 40 p=0.0004 "C"
+ranks — EOS(3)=1  UNK(1)=728  BOS(2)=4  PAD(0)=banned
+
+SELECTION greedy argmax -> id 3 = "<eos>"
+  *** argmax IS EOS. engine.decode() returns at engine.ts:442 before pushing it,
+      so tokenIds=[] and text="" with stopReason "eos". Pipeline is faithful;
+      the MODEL chose to stop immediately. ***
+
+  [greedy] stopReason=eos generated=0 meanNll=0.000
+    selected ids + strings: (none)
+    decode(ids)            : ""
+    decode(ids, keepSpecial): ""
+    all-selected-are-special: false  (true => decode() legitimately yields "")
+
+  [balanced] stopReason=eos generated=0 meanNll=0.000
+    selected ids + strings: (none)
+    decode(ids)            : ""
+    decode(ids, keepSpecial): ""
+    all-selected-are-special: false  (true => decode() legitimately yields "")
+
+----------------------------------------------------------------------
+prompt: "What is Alpha?"
+prompt ids (7) : [2, 522, 5, 140, 5, 692, 36]
+logit row: max=10.3683 logZ=11.3409 range=24.9784
+top-10 next-token candidates:
+   # 1 id=  3 p=0.3781 "<eos>"
+   # 2 id=  5 p=0.3746 " "
+   # 3 id=  4 p=0.2391 "\n"
+   # 4 id=  7 p=0.0013 "\""
+   # 5 id= 97 p=0.0006 "}"
+   # 6 id=205 p=0.0005 "ther"
+   # 7 id= 19 p=0.0003 "."
+   # 8 id=  2 p=0.0003 "<bos>"
+   # 9 id=184 p=0.0003 "ce"
+   #10 id=107 p=0.0002 "ç"
+ranks — EOS(3)=1  UNK(1)=716  BOS(2)=8  PAD(0)=banned
+
+SELECTION greedy argmax -> id 3 = "<eos>"
+  *** argmax IS EOS. engine.decode() returns at engine.ts:442 before pushing it,
+      so tokenIds=[] and text="" with stopReason "eos". Pipeline is faithful;
+      the MODEL chose to stop immediately. ***
+
+  [greedy] stopReason=eos generated=0 meanNll=0.000
+    selected ids + strings: (none)
+    decode(ids)            : ""
+    decode(ids, keepSpecial): ""
+    all-selected-are-special: false  (true => decode() legitimately yields "")
+
+  [balanced] stopReason=eos generated=0 meanNll=0.000
+    selected ids + strings: (none)
+    decode(ids)            : ""
+    decode(ids, keepSpecial): ""
+    all-selected-are-special: false  (true => decode() legitimately yields "")
+
+----------------------------------------------------------------------
+prompt: "Tell me about Ethiopia."
+prompt ids (16) : [2, 57, 73, 252, 5, 153, 5, 395, 5, 42, 131, 77, 368, 77, 69, 19]
+logit row: max=12.7203 logZ=12.7299 range=30.3544
+top-10 next-token candidates:
+   # 1 id=  5 p=0.9905 " "
+   # 2 id=  3 p=0.0072 "<eos>"
+   # 3 id= 19 p=0.0008 "."
+   # 4 id=  4 p=0.0005 "\n"
+   # 5 id= 17 p=0.0001 ","
+   # 6 id=  7 p=0.0001 "\""
+   # 7 id= 89 p=0.0000 "u"
+   # 8 id=418 p=0.0000 "om"
+   # 9 id=556 p=0.0000 "less"
+   #10 id=465 p=0.0000 "\n  "
+ranks — EOS(3)=2  UNK(1)=701  BOS(2)=88  PAD(0)=banned
+
+SELECTION greedy argmax -> id 5 = " "
+
+  [greedy] stopReason=max-tokens generated=40 meanNll=1.555
+    selected ids + strings: 5:" " 168:"The" 5:" " 69:"a" 5:" " 69:"a" 5:" " 133:"the" 5:" " 133:"the" 5:" " 133:"the" 5:" " 133:"the" 5:" " 133:"the" 5:" " 133:"the" 5:" " 133:"the" 5:" " 69:"a" 5:" " 69:"a" 5:" " 133:"the" 5:" " 69:"a" 5:" " 133:"the" 5:" " 69:"a" 5:" " 133:"the" 5:" " 69:"a" 5:" " 69:"a" 5:" " 69:"a"
+    decode(ids)            : " The a a the the the the the the the a a the a the a the a a a"
+    decode(ids, keepSpecial): " The a a the the the the the the the a a the a the a the a a a"
+    all-selected-are-special: false  (true => decode() legitimately yields "")
+
+  [balanced] stopReason=max-tokens generated=40 meanNll=2.802
+    selected ids + strings: 5:" " 133:"the" 5:" " 145:"to" 5:" " 140:"is" 77:"i" 75:"g" 152:"ar" 143:"ing" 5:" " 69:"a" 5:" " 140:"is" 19:"." 5:" " 141:"it" 86:"r" 158:"and" 5:" " 133:"the" 5:" " 132:"in" 164:"ver" 140:"is" 17:"," 17:"," 5:" " 168:"The" 72:"d" 155:"ent" 86:"r" 152:"ar" 146:"al" 88:"t" 83:"o" 73:"e" 81:"m" 156:"ra" 71:"c"
+    decode(ids)            : " the to isigaring a is. itrand the inveris,, Thedentraraltoemrac"
+    decode(ids, keepSpecial): " the to isigaring a is. itrand the inveris,, Thedentraraltoemrac"
+    all-selected-are-special: false  (true => decode() legitimately yields "")
+
+==========================================================================
+STAGE 7 — control: does decode() alone lose information?
+==========================================================================
+"Hello" -> [45, 466, 170] -> "Hello"
+"Tell me about Ethiopia." -> [57, 73, 252, 5, 153, 5, 395, 5, 42, 131, 77, 368, 77, 69, 19] -> "Tell me about Ethiopia."
+"The quick brown fox." -> [168, 5, 643, 198, 5, 70, 502, 82, 5, 216, 92, 19] -> "The quick brown fox."
+sanity: decode([unk,unk,unk]) = "" (expected "" by design)
+sanity: decode(pad x5)     = "" (expected "" by design)
+
+Diagnosis complete. No weights were read for writing; nothing was trained.

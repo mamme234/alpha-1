@@ -1,0 +1,38 @@
+TRAINING STREAM STRUCTURE (re-derived, read-only)
+
+documents (train split) : 3860
+total train tokens      : 935038
+mean tokens per doc     : 242.2
+median                  : 215
+p10 / p90               : 85 / 378
+min / max               : 38 / 64790
+model contextLength     : 256
+
+docs that FIT in one 256-token window: 2484 / 3860 (64.352%)
+docs <= 128 tokens                    : 890 (23.057%)
+
+docs whose LAST content token is "." : 3498 (90.622%)
+docs whose last content token is other: 362
+
+EOS occurrences in stream: 3860 = 0.413% (1 per 242 tokens)
+BOS occurrences in stream: 3860 = 0.413%
+
+EOS position inside a 256-token training window (3652 sampled windows):
+   position  96: 26 times
+   position 134: 26 times
+   position 162: 26 times
+   position 206: 26 times
+   position  37: 23 times
+   position  46: 23 times
+   position  50: 23 times
+   position  72: 23 times
+mean EOS position: 126.6 / 255
+
+P(EOS | previous token is "."):  13.473%  (n=334)
+P(EOS | previous token other):  0.061%  (n=9866)
+
+ratio: EOS is 222x more likely after "." than otherwise
+
+documents with <= 1 sentence-final punctuation: 451 / 4289 (10.515%)
+
+No weights were modified. Read-only.
